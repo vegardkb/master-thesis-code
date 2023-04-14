@@ -1,0 +1,786 @@
+from tqdm import tqdm
+import numpy as np
+import copy
+from scipy import signal
+from scipy.stats import linregress, pearsonr
+from sklearn.linear_model import LinearRegression
+import pandas as pd
+
+from fio import (
+    load_cfg,
+    load_custom_rois,
+    generate_global_results_dir,
+    generate_exp_dir,
+    generate_denoised_dir,
+    generate_roi_dff_dir,
+    gen_npy_fname,
+    gen_pickle_fname,
+)
+
+EXP_NAMES = [
+    "20211112_13_23_43_GFAP_GCamp6s_F2_PTZ",
+    "20211112_18_30_27_GFAP_GCamp6s_F5_c2",
+    "20211112_19_48_54_GFAP_GCamp6s_F6_c3",
+    "20211117_21_31_08_GFAP_GCamp6s_F6_PTZ",
+    "20211119_16_36_20_GFAP_GCamp6s_F4_PTZ",
+    "20220211_13_18_56_GFAP_GCamp6s_F2_C",
+    "20220211_16_51_15_GFAP_GCamp6s_F4_PTZ",
+    "20220412_12_32_27_GFAP_GCamp6s_F2_PTZ",
+    "20220412_13_59_55_GFAP_GCamp6s_F3_C",
+]
+CROP_IDS = ["OpticTectum"]
+ROIS_FNAME = "rois"
+ACTIVITY_FNAME = "dff_stat"
+
+DFF_REGS_FNAME = "dff_light_response"
+SECOND_DERIVATIVE_FNAME = "d2xdt2_light_response"
+STATS_FNAME = "stats_light_response"
+T_ONSET_FNAME = "t_onsets_light_response"
+
+DISTAL_REG = 0
+BUFFER_T = 5
+PRE_EVENT_T = 5
+POST_EVENT_T_PEAK = 40
+POST_STIM_T = 5
+STIM_DURATION = 10
+
+DECAY_THRESHOLD = 0.8
+
+USE_DENOISED = True
+USE_CHAN2 = False
+
+ISIS = [300]
+
+CELL_LENGTH = 55
+
+FREQ_CUT_OFF = 0.25
+FILTER_ORDER = 8
+
+N_REGIONS_LIST = [3, 6, 9]
+
+
+def arp_model_fit(x, p):
+    n = len(x)
+    X = np.zeros((n - p, p))
+    y = np.zeros(n - p)
+
+    for t in range(n - p):
+        X[t] = np.flip(x[t : t + p])
+        y[t] = x[t + p]
+
+    model = LinearRegression(fit_intercept=False).fit(X, y)
+    phis = model.coef_
+
+    return phis
+
+
+def arp_model_pred(x, par):
+    p = len(par)
+    n = len(x)
+    y = np.zeros(n)
+    y[:p] = x[:p]
+    for t in range(p, n):
+        for i in range(p):
+            y[t] += par[i] * x[t - 1 - i]
+
+    return y
+
+
+def arp_model_res(x, par):
+    y = arp_model_pred(x, par)
+    z = x - y
+    return z
+
+
+def create_column_names(num_regions):
+    cols = [
+        "exp_name",
+        "crop_id",
+        "roi_number",
+        "isi",
+        "ptz",
+        "evt_num",
+        "amp_slope",
+        "t_peak_slope",
+        "t_peak_pearsonr",
+        "t_onset_slope",
+        "t_onset_pearsonr",
+        "t_lag_av_slope",
+        "t_lag_distal_slope",
+        "t_lag_distal_post_slope",
+        "prop_dist",
+        "prop_origin",
+    ]
+    for reg_num in range(num_regions):
+        cols = cols + [
+            "peak" + f"_r{reg_num}",
+            "bl" + f"_r{reg_num}",
+            "amp" + f"_r{reg_num}",
+            "t_peak" + f"_r{reg_num}",
+            "t_decay" + f"_r{reg_num}",
+            "t_constant_decay" + f"_r{reg_num}",
+            "t_lag_av" + f"_r{reg_num}",
+            "corr_av" + f"_r{reg_num}",
+            "t_lag_distal" + f"_r{reg_num}",
+            "corr_distal" + f"_r{reg_num}",
+            "t_lag_distal_post" + f"_r{reg_num}",
+            "corr_distal_post" + f"_r{reg_num}",
+            "acc_onset" + f"_r{reg_num}",
+            "acc_middle" + f"_r{reg_num}",
+            "acc_offset" + f"_r{reg_num}",
+            "t_onset" + f"_r{reg_num}",
+            "diff_dxdt" + f"_r{reg_num}",
+            "t_peak_d2xdt2" + f"_r{reg_num}",
+            "peak_d2xdt2" + f"_r{reg_num}",
+        ]
+    return cols
+
+
+def create_empty_results_dict(cols):
+    results_dict = {}
+    for col in cols:
+        results_dict[col] = []
+
+    return results_dict
+
+
+def create_empty_t_onsets_dict():
+    t_onsets_dict = {
+        "exp_name": [],
+        "crop_id": [],
+        "roi_number": [],
+        "isi": [],
+        "ptz": [],
+        "evt_num": [],
+        "time_com": [],
+        "time_start": [],
+        "time_end": [],
+        "time_peak": [],
+        "dxdt_end": [],
+        "diff_dxdt": [],
+        "peak": [],
+        "region": [],
+    }
+    return t_onsets_dict
+
+
+def first_derivative(x, dt):
+    return (x[1:-5] - 8 * x[2:-4] + 8 * x[4:-2] - x[5:-1]) / (12 * dt)
+
+
+def second_derivative(x, dt):
+    return (-x[1:-5] + 16 * x[2:-4] - 30 * x[3:-3] + 16 * x[4:-2] - x[5:-1]) / (
+        12 * dt**2
+    )
+
+
+def time_constant(x, dt):
+    y = copy.deepcopy(x)
+    dxdt = first_derivative(y, dt)
+    y = y[3:-3]
+
+    dxdt[dxdt >= 0] = -1e-10
+    y[y <= 0.2] = np.inf
+    tau = -y / dxdt
+
+    time_const = np.amin(tau, axis=0)
+
+    return time_const
+
+
+def calc_peak_bl_amp(dff_reg, reg_mean_pos, fs):
+    dff_bl = dff_reg[: int(PRE_EVENT_T * fs)]
+    dff_peak = dff_reg[
+        int(PRE_EVENT_T * fs) : int((PRE_EVENT_T + POST_EVENT_T_PEAK) * fs)
+    ]
+
+    bl = np.mean(dff_bl, axis=0)
+    peak = np.amax(dff_peak, axis=0)
+    neg = peak < bl
+
+    if np.any(neg):
+        peak[neg] = np.amin(dff_peak[:, neg], axis=0)
+    amp = peak - bl
+
+    stats, names = [], []
+    for reg_num in range(dff_reg.shape[1]):
+        stats.append(bl[reg_num]), names.append(f"bl_r{reg_num}")
+        stats.append(peak[reg_num]), names.append(f"peak_r{reg_num}")
+        stats.append(amp[reg_num]), names.append(f"amp_r{reg_num}")
+
+    amp_slope = linregress(reg_mean_pos, amp).slope
+    prop_dist, prop_origin = propagation_dist(amp)
+    stats.append(amp_slope), names.append("amp_slope")
+    stats.append(prop_dist), names.append("prop_dist")
+    stats.append(prop_origin), names.append("prop_origin")
+
+    return stats, names
+
+
+def subtract_baseline(dff_reg, fs):
+    dff_bl = dff_reg[: int(PRE_EVENT_T * fs)]
+    bl_sub_dff = dff_reg - np.mean(dff_bl, axis=0)
+    return bl_sub_dff
+
+
+def calc_ts(dff_reg, reg_mean_pos, fs):
+    num_regions = dff_reg.shape[1]
+    t_stim = np.ones(num_regions) * PRE_EVENT_T
+    ind_peak = np.argmax(
+        dff_reg[int(PRE_EVENT_T * fs) : int((PRE_EVENT_T + POST_EVENT_T_PEAK) * fs)],
+        axis=0,
+    )
+    t_peak = (ind_peak + int(PRE_EVENT_T * fs)) / fs - t_stim
+    t_constant_decay = time_constant(dff_reg, 1 / fs)
+
+    t_decay = np.zeros(num_regions)
+    for reg_num in range(num_regions):
+        peak = np.amax(
+            dff_reg[
+                int(PRE_EVENT_T * fs) : int((PRE_EVENT_T + POST_EVENT_T_PEAK) * fs),
+                reg_num,
+            ],
+            axis=0,
+        )
+        ind_decay = ind_peak[reg_num] + int(PRE_EVENT_T * fs)
+        while (
+            dff_reg[ind_decay, reg_num] > DECAY_THRESHOLD * peak
+            and ind_decay < dff_reg.shape[0] - 1
+        ):
+            ind_decay += 1
+
+        t_decay[reg_num] = (ind_decay - ind_peak[reg_num]) / fs
+
+    stats, names = [], []
+    for reg_num in range(dff_reg.shape[1]):
+        stats.append(t_peak[reg_num]), names.append(f"t_peak_r{reg_num}")
+        stats.append(t_decay[reg_num]), names.append(f"t_decay_r{reg_num}")
+        stats.append(t_constant_decay[reg_num]), names.append(
+            f"t_constant_decay_r{reg_num}"
+        )
+
+    t_peak_slope = linregress(reg_mean_pos, t_peak).slope
+    t_peak_pearsonr = np.absolute(pearsonr(reg_mean_pos, t_peak)[0])
+
+    stats.append(t_peak_slope), names.append("t_peak_slope")
+    stats.append(t_peak_pearsonr), names.append("t_peak_pearsonr")
+
+    return stats, names
+
+
+def low_pass_filter(dff_raw, fs, f_c, order):
+    sos = signal.butter(order, f_c, btype="low", output="sos", fs=fs)
+    dff_reg = signal.sosfiltfilt(sos, dff_raw, axis=0)
+    return dff_reg
+
+
+def acceleration(d2xdt2, fs):
+    onset_phase = [int(PRE_EVENT_T * fs), int((PRE_EVENT_T + 5) * fs)]
+    middle_phase = [int((PRE_EVENT_T + 5) * fs), int((PRE_EVENT_T + 10) * fs)]
+    offset_phase = [int((PRE_EVENT_T + 10) * fs), int((PRE_EVENT_T + 15) * fs)]
+
+    acc_onset = np.mean(d2xdt2[onset_phase[0] : onset_phase[1]], axis=0)
+    acc_middle = np.mean(d2xdt2[middle_phase[0] : middle_phase[1]], axis=0)
+    acc_offset = np.mean(d2xdt2[offset_phase[0] : offset_phase[1]], axis=0)
+
+    stats, names = [], []
+    for reg_num in range(d2xdt2.shape[1]):
+        stats.append(acc_onset[reg_num]), names.append(f"acc_onset_r{reg_num}")
+        stats.append(acc_middle[reg_num]), names.append(f"acc_middle_r{reg_num}")
+        stats.append(acc_offset[reg_num]), names.append(f"acc_offset_r{reg_num}")
+
+    return stats, names
+
+
+def propagation_dist(amp_reg):
+    prop_dists = []
+    prop_origins = []
+    prop_dist = 0
+    prop_origin = 0
+    amp = amp_reg[0]
+    for reg_num in range(1, amp_reg.shape[0]):
+        if amp_reg[reg_num] > amp:
+            prop_dist += 1
+
+        else:
+            prop_dists.append(prop_dist)
+            prop_origins.append(prop_origin)
+            prop_dist = 0
+            prop_origin = reg_num
+
+        amp = amp_reg[reg_num]
+
+    prop_dists.append(prop_dist)
+    prop_origins.append(prop_origin)
+
+    max_dist = -np.inf
+    argmax = 0
+    ind = 0
+
+    while ind < len(prop_dists):
+        dist = prop_dists[ind]
+        if dist > max_dist:
+            max_dist = dist
+            argmax = ind
+            max_dist = dist
+
+        ind += 1
+
+    return prop_dists[argmax], prop_origins[argmax]
+
+
+def calc_lag_corr(x, x_ref, fs, max_lag=30):
+    mu_x = np.mean(x)
+    mu_ref = np.mean(x_ref)
+    norm_x = np.sqrt(np.sum(np.power(x - mu_x, 2)))
+    norm_ref = np.sqrt(np.sum(np.power(x_ref - mu_ref, 2)))
+    corr = signal.correlate(x - np.mean(x), x_ref - np.mean(x_ref), mode="same")
+    norm = norm_x * norm_ref
+
+    corr = corr / norm
+    lags = np.arange(x.shape[0]) / fs
+    lags = lags - np.amax(lags) / 2
+
+    lag_mask = np.absolute(lags) < max_lag
+    lags = lags[lag_mask]
+    corr = corr[lag_mask]
+
+    lag_ind = np.argmax(corr)
+
+    """
+        Start debug
+    """
+    """ plt.figure()
+    plt.plot(x, label="x")
+    plt.plot(x_ref, label="x_ref")
+    plt.legend()
+
+    plt.figure()
+    plt.plot(lags, corr)
+    plt.ylabel("Corr")
+    plt.xlabel("Lag")
+    plt.show() """
+    """
+        End debug
+    """
+
+    return lags[lag_ind], corr[lag_ind]
+
+
+def calc_t_lag(dff_reg, reg_mean_pos, fs):
+    num_regions = dff_reg.shape[1]
+
+    dff_distal_whole = dff_reg[:, DISTAL_REG]
+    p = 25
+    phis = arp_model_fit(dff_distal_whole, p)
+
+    dff_onset = dff_reg[: int((PRE_EVENT_T + STIM_DURATION + POST_STIM_T) * fs)]
+    dff_onset_res = np.array(
+        [arp_model_res(dff_onset[:, reg_num], phis) for reg_num in range(num_regions)]
+    ).T
+
+    dff_onset = dff_onset_res
+
+    dff_av = np.mean(dff_onset[p:], axis=1)
+    dff_distal = dff_onset[p:, DISTAL_REG]
+
+    dff_post_onset = dff_onset[
+        int((PRE_EVENT_T + 2) * fs) : int((PRE_EVENT_T + 15) * fs)
+    ]
+    dff_post_distal = dff_post_onset[:, DISTAL_REG]
+
+    corr_av, t_lag_av = [], []
+    corr_distal, t_lag_distal = [], []
+    corr_distal_post, t_lag_distal_post = [], []
+
+    for reg_num in range(num_regions):
+        dff = dff_onset[:, reg_num]
+        dff_post = dff_post_onset[:, reg_num]
+
+        lag, corr = calc_lag_corr(dff, dff_av, fs)
+        t_lag_av.append(lag), corr_av.append(corr)
+        lag, corr = calc_lag_corr(dff, dff_distal, fs)
+        t_lag_distal.append(lag), corr_distal.append(corr)
+        lag, corr = calc_lag_corr(dff_post, dff_post_distal, fs)
+        t_lag_distal_post.append(lag), corr_distal_post.append(corr)
+
+    stats, names = [], []
+    for reg_num in range(num_regions):
+        stats.append(corr_av[reg_num]), names.append(f"corr_av_r{reg_num}")
+        stats.append(t_lag_av[reg_num]), names.append(f"t_lag_av_r{reg_num}")
+        stats.append(corr_distal[reg_num]), names.append(f"corr_distal_r{reg_num}")
+        stats.append(t_lag_distal[reg_num]), names.append(f"t_lag_distal_r{reg_num}")
+        stats.append(corr_distal_post[reg_num]), names.append(
+            f"corr_distal_post_r{reg_num}"
+        )
+        stats.append(t_lag_distal_post[reg_num]), names.append(
+            f"t_lag_distal_post_r{reg_num}"
+        )
+
+    t_lag_av_slope = linregress(reg_mean_pos, t_lag_av).slope
+    t_lag_distal_slope = linregress(reg_mean_pos, t_lag_distal).slope
+    t_lag_distal_post_slope = linregress(reg_mean_pos, t_lag_distal_post).slope
+    stats.append(t_lag_av_slope), names.append("t_lag_av_slope")
+    stats.append(t_lag_distal_slope), names.append("t_lag_distal_slope")
+    stats.append(t_lag_distal_post_slope), names.append("t_lag_distal_post_slope")
+
+    return stats, names
+
+
+def calc_t_onsets(d2xdt2, dxdt, reg_mean_pos, fs):
+    t_onset_dict = {
+        "time_com": [],
+        "time_start": [],
+        "time_end": [],
+        "time_peak": [],
+        "dxdt_end": [],
+        "diff_dxdt": [],
+        "peak": [],
+        "region": [],
+    }
+
+    stats, names = [], []
+    num_regions = d2xdt2.shape[1]
+
+    t_onsets = np.zeros(num_regions)
+    for reg_num in range(num_regions):
+        d2xdt2_onset = d2xdt2[
+            int(PRE_EVENT_T * fs / 2) : int(
+                (PRE_EVENT_T + STIM_DURATION + POST_STIM_T) * fs
+            ),
+            reg_num,
+        ]
+        dxdt_onset = dxdt[
+            int(PRE_EVENT_T * fs / 2) : int(
+                (PRE_EVENT_T + STIM_DURATION + POST_STIM_T) * fs
+            ),
+            reg_num,
+        ]
+
+        peaks, _ = signal.find_peaks(d2xdt2_onset, height=0.0001)
+        midpoint_list = []
+        if len(peaks) > 1:
+            peaks_filt = peaks.tolist()
+            merge_list = []
+
+            for ind1, ind2 in zip(peaks[:-1], peaks[1:]):
+                x_between = d2xdt2_onset[ind1 : ind2 + 1]
+                midpoint = np.argmin(x_between)
+                midpoint_list.append(midpoint + ind1)
+
+                rel_diff_t = 0.01
+                rel_diff_l = (x_between[0] - x_between[midpoint]) / x_between[midpoint]
+                rel_diff_r = (x_between[-1] - x_between[midpoint]) / x_between[midpoint]
+
+                if np.any(x_between < 0):
+                    merge_list.append(False)
+                elif rel_diff_l > rel_diff_t or rel_diff_r > rel_diff_t:
+                    merge_list.append(False)
+                else:
+                    merge_list.append(True)
+
+            i = 0
+            while i < len(merge_list):
+                ind1 = peaks_filt[i]
+                ind2 = peaks_filt[i + 1]
+                merge = merge_list[i]
+
+                if merge:
+                    merge_list.pop(i)
+                    midpoint_list.pop(i)
+                    peaks_filt.pop(i)
+
+                    if d2xdt2_onset[ind1] >= d2xdt2_onset[ind2]:
+                        peaks_filt[i] = ind1
+                    else:
+                        peaks_filt[i] = ind2
+
+                    i = 0
+                else:
+                    i += 1
+
+            peaks = np.array(peaks_filt)
+
+        t_com = np.nan
+        diff_dxdt = -np.inf
+
+        max_t_peak = np.nan
+        max_peak = -np.inf
+
+        for i, peak in enumerate(peaks):
+            pre_mid = 0
+            post_mid = d2xdt2_onset.shape[0] - 1
+
+            if len(midpoint_list):
+                if i == 0:
+                    post_mid = midpoint_list[i]
+                elif i == len(midpoint_list):
+                    pre_mid = midpoint_list[i - 1]
+                else:
+                    pre_mid = midpoint_list[i - 1]
+                    post_mid = midpoint_list[i]
+
+            start_ind, end_ind = peak, peak
+            while start_ind > pre_mid and d2xdt2_onset[start_ind - 1] > 0:
+                start_ind = start_ind - 1
+
+            while end_ind < post_mid and d2xdt2_onset[end_ind + 1] > 0:
+                end_ind = end_ind + 1
+
+            t_int = np.arange(start_ind, end_ind + 1) / fs - PRE_EVENT_T / 2
+            x_int = d2xdt2_onset[start_ind : end_ind + 1]
+
+            d2xdt2_peak = d2xdt2_onset[peak]
+            t_peak = t_int[peak - start_ind]
+
+            int_d2xdt2 = np.sum(x_int) / fs
+            try:
+                t_cmass = np.average(t_int, weights=x_int)
+            except ZeroDivisionError:
+                print(f"\n\n\n\n\nx_int: {x_int}")
+                raise ZeroDivisionError
+
+            t_onset_dict["time_com"].append(t_cmass)
+            t_onset_dict["time_start"].append(np.amin(t_int))
+            t_onset_dict["time_end"].append(np.amax(t_int))
+            t_onset_dict["time_peak"].append(t_peak)
+            t_onset_dict["dxdt_end"].append(dxdt_onset[end_ind])
+            t_onset_dict["diff_dxdt"].append(int_d2xdt2)
+            t_onset_dict["peak"].append(d2xdt2_peak)
+            t_onset_dict["region"].append(reg_num)
+
+            if int_d2xdt2 > diff_dxdt:
+                diff_dxdt = int_d2xdt2
+                t_com = t_cmass
+
+            if d2xdt2_peak > max_peak:
+                max_peak = d2xdt2_peak
+                max_t_peak = t_peak
+
+        t_onsets[reg_num] = t_com
+        stats.append(t_com), names.append(f"t_onset_r{reg_num}")
+        stats.append(diff_dxdt), names.append(f"diff_dxdt_r{reg_num}")
+        stats.append(max_t_peak), names.append(f"t_peak_d2xdt2_r{reg_num}")
+        stats.append(max_peak), names.append(f"peak_d2xdt2_r{reg_num}")
+
+    good = np.logical_not(np.logical_or(np.isnan(t_onsets), np.isinf(t_onsets)))
+
+    t_onset_slope = linregress(reg_mean_pos[good], t_onsets[good]).slope
+    t_onset_pearsonr = np.absolute(pearsonr(reg_mean_pos[good], t_onsets[good])[0])
+
+    stats.append(t_onset_slope), names.append("t_onset_slope")
+    stats.append(t_onset_pearsonr), names.append("t_onset_pearsonr")
+
+    return t_onset_dict, stats, names
+
+
+def calc_stats(dff_reg_filt, d2xdt2, reg_mean_pos, fs):
+    stats = []
+    names = []
+
+    stat_list, name_list = calc_peak_bl_amp(dff_reg_filt, reg_mean_pos, fs)
+    stats += stat_list
+    names += name_list
+
+    stat_list, name_list = acceleration(d2xdt2, fs)
+    stats += stat_list
+    names += name_list
+
+    stat_list, name_list = calc_ts(dff_reg_filt, reg_mean_pos, fs)
+    stats += stat_list
+    names += name_list
+
+    stat_list, name_list = calc_t_lag(dff_reg_filt, reg_mean_pos, fs)
+    stats += stat_list
+    names += name_list
+
+    return stats, names
+
+
+def dump_meta_stats(result_dict, exp_name, crop_id, roi_num, isi, ptz_exp, evt_num):
+    key = list(result_dict.keys())[0]
+    num_elements = len(result_dict[key])
+    result_dict["exp_name"] = [exp_name for _ in range(num_elements)]
+    result_dict["crop_id"] = [crop_id for _ in range(num_elements)]
+    result_dict["roi_number"] = [roi_num for _ in range(num_elements)]
+    result_dict["isi"] = [isi for _ in range(num_elements)]
+    result_dict["ptz"] = [ptz_exp for _ in range(num_elements)]
+    result_dict["evt_num"] = [evt_num for _ in range(num_elements)]
+
+    return result_dict
+
+
+def dump_stats(stats, names, exp_name, crop_id, roi_num, isi, ptz, evt_num):
+    result_dict = {}
+    for stat, name in zip(stats, names):
+        result_dict[name] = [stat]
+
+    result_dict = dump_meta_stats(
+        result_dict, exp_name, crop_id, roi_num, isi, ptz, evt_num
+    )
+    return result_dict
+
+
+def concat_dicts(dict1, dict2):
+    ret_dict = {}
+    for key in dict1.keys():
+        try:
+            ret_dict[key] = dict1[key] + dict2[key]
+        except KeyError:
+            print(f"key not used: {key}")
+
+    return ret_dict
+
+
+def process_roi(
+    exp_name,
+    crop_id,
+    roi_num,
+    isi,
+    ptz,
+    dff_dir,
+    results_dict,
+    dff_regs,
+    d2xdt2s,
+    t_onsets_dict,
+    num_regions,
+    fs,
+):
+
+    try:
+        dff_evts = np.load(
+            gen_npy_fname(
+                dff_dir,
+                f"{ACTIVITY_FNAME}_{num_regions}_regions_light_response_ISI_{isi}",
+            )
+        )
+        reg_mean_pos = np.load(
+            gen_npy_fname(
+                dff_dir,
+                f"regpos_{num_regions}_regions",
+            )
+        )
+    except FileNotFoundError:
+        return results_dict, dff_regs, d2xdt2s, t_onsets_dict
+
+    num_evts = dff_evts.shape[0]
+
+    for evt_num in tqdm(range(num_evts), desc="Event", leave=False):
+        dff_reg = dff_evts[evt_num]
+
+        dff_reg_filt = low_pass_filter(
+            dff_reg,
+            fs,
+            FREQ_CUT_OFF,
+            FILTER_ORDER,
+        )
+        d2xdt2 = np.zeros(dff_reg_filt.shape)
+        d2xdt2[3:-3] = second_derivative(dff_reg_filt, 1 / fs)
+        dxdt = np.zeros(dff_reg_filt.shape)
+        dxdt[3:-3] = first_derivative(dff_reg_filt, 1 / fs)
+        dff_regs.append(subtract_baseline(dff_reg, fs))
+        d2xdt2s.append(d2xdt2)
+
+        t_onset_dict, stats_t_onset, names_t_onset = calc_t_onsets(
+            d2xdt2, dxdt, reg_mean_pos, fs
+        )
+        t_onset_dict = dump_meta_stats(
+            t_onset_dict, exp_name, crop_id, roi_num, isi, ptz, evt_num
+        )
+
+        stats, names = calc_stats(dff_reg_filt, d2xdt2, reg_mean_pos, fs)
+        stats += stats_t_onset
+        names += names_t_onset
+
+        result_dict = dump_stats(
+            stats, names, exp_name, crop_id, roi_num, isi, ptz, evt_num
+        )
+
+        results_dict = concat_dicts(results_dict, result_dict)
+        t_onsets_dict = concat_dicts(t_onsets_dict, t_onset_dict)
+
+    column_lengths = []
+    for key in results_dict.keys():
+        col_len = len(results_dict[key])
+        column_lengths.append(col_len)
+        if not col_len:
+            print(f"Empty column: {key}")
+
+    column_lengths = np.array(column_lengths)
+    if not np.all(column_lengths == column_lengths[0]):
+        print("Not all columns are same length")
+
+    return results_dict, dff_regs, d2xdt2s, t_onsets_dict
+
+
+def main():
+
+    results_dir = generate_global_results_dir()
+    exp_crop = []
+    for exp_name in EXP_NAMES:
+        for crop_id in CROP_IDS:
+            exp_crop.append((exp_name, crop_id))
+
+    for num_regions in tqdm(N_REGIONS_LIST, desc="num_regions"):
+        cols = create_column_names(num_regions)
+        results_dict = create_empty_results_dict(cols)
+        dff_regs = []
+        d2xdt2s = []
+        t_onsets_dict = create_empty_t_onsets_dict()
+        for exp_name, crop_id in tqdm(exp_crop, desc="exp_crop", leave=False):
+            ptz_exp = "ptz" in exp_name.lower()
+            exp_dir = generate_exp_dir(exp_name, crop_id)
+            cfg = load_cfg(exp_dir)
+            fs = cfg.volume_rate
+
+            if USE_DENOISED:
+                exp_dir = generate_denoised_dir(exp_dir, USE_CHAN2)
+
+            rois = load_custom_rois(exp_dir, ROIS_FNAME)
+            n_rois = len(rois)
+
+            for roi_num in tqdm(range(n_rois), desc="Roi", leave=False):
+                roi_num_str = str(roi_num)
+                dff_dir = generate_roi_dff_dir(exp_dir, roi_num_str, ROIS_FNAME)
+
+                for isi in ISIS:
+                    (results_dict, dff_regs, d2xdt2s, t_onsets_dict,) = process_roi(
+                        exp_name,
+                        crop_id,
+                        roi_num,
+                        isi,
+                        ptz_exp,
+                        dff_dir,
+                        results_dict,
+                        dff_regs,
+                        d2xdt2s,
+                        t_onsets_dict,
+                        num_regions,
+                        fs,
+                    )
+
+        df_results = pd.DataFrame(results_dict)
+        df_t_onset = pd.DataFrame(t_onsets_dict)
+        dff_regs = np.array(dff_regs)
+        d2xdt2s = np.array(d2xdt2s)
+
+        df_results.to_pickle(
+            gen_pickle_fname(results_dir, STATS_FNAME + f"_{num_regions}_regions")
+        )
+        df_t_onset.to_pickle(
+            gen_pickle_fname(results_dir, T_ONSET_FNAME + f"_{num_regions}_regions")
+        )
+        np.save(
+            gen_npy_fname(results_dir, DFF_REGS_FNAME + f"_{num_regions}_regions"),
+            dff_regs,
+        )
+        np.save(
+            gen_npy_fname(
+                results_dir, SECOND_DERIVATIVE_FNAME + f"_{num_regions}_regions"
+            ),
+            d2xdt2s,
+        )
+
+
+if __name__ == "__main__":
+    main()

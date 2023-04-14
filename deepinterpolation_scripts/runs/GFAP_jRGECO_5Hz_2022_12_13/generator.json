@@ -1,0 +1,1 @@
+{"type": "generator", "steps_per_epoch": 5, "name": "OphysGenerator", "pre_post_frame": 30, "train_path": "..\\..\\processed\\20220531_12_34_15_HuC_GCamp6s_GFAP_jRGECO_F1_C\\OpticTectum\\aligned_chan2.h5", "batch_size": 5, "start_frame": 5000, "end_frame": 9999, "pre_post_omission": 0}

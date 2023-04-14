@@ -1,0 +1,3 @@
+Indicator: HuC-GCamp6s
+Training set: 20220531_12_34_15_HuC_GCamp6s_GFAP_jRGECO_F1_C
+Validation set: 20220531_14_21_02_HuC_GCamp6s_GFAP_jRGECO_F2_PTZ
