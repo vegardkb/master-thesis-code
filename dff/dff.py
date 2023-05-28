@@ -18,18 +18,26 @@ from sigproc import (
     get_pos,
     calc_c_pos,
     calc_pos_pca0,
+    get_reg_mask,
 )
 
 EXP_NAMES = [
     "20211112_13_23_43_GFAP_GCamp6s_F2_PTZ",
     "20211112_18_30_27_GFAP_GCamp6s_F5_c2",
     "20211112_19_48_54_GFAP_GCamp6s_F6_c3",
-    "20211117_21_31_08_GFAP_GCamp6s_F6_PTZ",
+    # "20211117_14_17_58_GFAP_GCamp6s_F2_C",
+    # "20211117_17_33_00_GFAP_GCamp6s_F4_PTZ",
+    # "20211117_21_31_08_GFAP_GCamp6s_F6_PTZ",
     "20211119_16_36_20_GFAP_GCamp6s_F4_PTZ",
+    # "20211119_18_15_06_GFAP_GCamp6s_F5_C",
+    # "20211119_21_52_35_GFAP_GCamp6s_F7_C",
     "20220211_13_18_56_GFAP_GCamp6s_F2_C",
+    # "20220211_15_02_16_GFAP_GCamp6s_F3_PTZ",
     "20220211_16_51_15_GFAP_GCamp6s_F4_PTZ",
+    # "20220412_10_43_04_GFAP_GCamp6s_F1_PTZ",
     "20220412_12_32_27_GFAP_GCamp6s_F2_PTZ",
     "20220412_13_59_55_GFAP_GCamp6s_F3_C",
+    # "20220412_16_06_54_GFAP_GCamp6s_F4_PTZ",
 ]
 
 """ EXP_NAMES = [
@@ -37,8 +45,9 @@ EXP_NAMES = [
     "20220604_15_00_04_HuC_GCamp6s_GFAP_jRGECO_F2_PTZ",
     # "20220604_16_24_03_HuC_GCamp6s_GFAP_jRGECO_F3_PTZ",
 ] """
+
 CROP_ID = "OpticTectum"
-ROIS_FNAME = "rois"
+ROIS_FNAME = "rois_smooth"
 PROTOCOL_NAME = "GFAP;Gcamp6s2021_11_12_data"
 ACTIVITY_FNAME = "dff_stat"
 
@@ -67,7 +76,8 @@ CROP_CELL = False
 CELL_LENGTH = 55
 AXIAL_BIN_SIZE = 0.5
 
-N_REGIONS_LIST = [3, 6, 9]
+N_REGIONS_LIST = [110]
+MAX_DYN_RANGE = False
 
 
 class EventType(Enum):
@@ -205,20 +215,12 @@ def calc_dff_evt_stim(dff, event_indices, event_ends, pre_event_samples, n_pix_c
     return dff_evts
 
 
-def get_reg_mask(pos_pca0, n_regions):
-    """
-    Divide into regions by position along proximal-distal axis, equal length of regions
-    """
+def check_roi_continuous(pos_pca0, n_regions):
+    reg_mask = get_reg_mask(pos_pca0, n_regions)
+    if np.any(np.logical_not(np.any(reg_mask, axis=1))):
+        return False
 
-    thr = np.linspace(
-        np.amin(pos_pca0) - 1e-10, np.amax(pos_pca0) + 1e-10, n_regions + 1
-    )
-
-    mask = []
-    for i in range(n_regions):
-        mask.append(np.logical_and(pos_pca0 > thr[i], pos_pca0 <= thr[i + 1]))
-
-    return np.array(mask)
+    return True
 
 
 def get_reg_activity(reg_mask, x, max_dyn_range=False):
@@ -263,7 +265,9 @@ def light_response_regions(dff_evt_dict, output_dir, pos_pd, c_pos):
                 reg_pos = pos_pd[region_mask[reg_num]]
                 reg_mean_pos[reg_num] = np.mean(reg_pos)
 
-            dff_reg = get_reg_activity(region_mask, dff_evts)
+            dff_reg = get_reg_activity(
+                region_mask, dff_evts, max_dyn_range=MAX_DYN_RANGE
+            )
 
             np.save(
                 gen_npy_fname(
@@ -321,6 +325,11 @@ def process_exp(exp_name):
             success, f_c, c_pos, pos_pd = crop_cell(f_c, c_pos, pos_pd)
             if not success:
                 continue
+
+        success = check_roi_continuous(pos_pd, max(N_REGIONS_LIST))
+        if not success:
+            print(f"Too many regions for {exp_name} cell {roi_num}")
+            continue
 
         dff_stat, _ = calc_dff_stat(f_c, N_T_FILT_STAT, FILTER_STAT, FILTER_PARAMETER)
 

@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
 
-EXP_NAME = "20220604_13_23_11_HuC_GCamp6s_GFAP_jRGECO_F1_C"
-# EXP_NAME = "20220604_16_24_03_HuC_GCamp6s_GFAP_jRGECO_F3_PTZ"
+#EXP_NAME = "20220604_13_23_11_HuC_GCamp6s_GFAP_jRGECO_F1_C"
+EXP_NAME = "20220604_16_24_03_HuC_GCamp6s_GFAP_jRGECO_F3_PTZ"
 # EXP_NAME = "20220604_15_00_04_HuC_GCamp6s_GFAP_jRGECO_F2_PTZ"
 CROP_ID = "OpticTectum"
 EXP_DIR = f"Y:\\Vegard\\data\\{EXP_NAME}\\{CROP_ID}"

@@ -16,7 +16,7 @@ def calc_c_pos(roi, pos, Ly):
         - c_pos: ndarray: (2, n_pix). c_pos[0] = y-position, c_pos[1] = x-position.
     """
     c_pos = np.reshape(pos[:, roi], (2, -1))
-    # c_pos[0, :] = Ly - c_pos[0, :]
+    c_pos[0, :] = Ly - c_pos[0, :]
     return c_pos
 
 

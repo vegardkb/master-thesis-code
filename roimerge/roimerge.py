@@ -28,7 +28,7 @@ EXP_NAMES = [
     "20211112_19_48_54_GFAP_GCamp6s_F6_c3",
     # "20211117_14_17_58_GFAP_GCamp6s_F2_C",
     # "20211117_17_33_00_GFAP_GCamp6s_F4_PTZ",
-    "20211117_21_31_08_GFAP_GCamp6s_F6_PTZ",
+    # "20211117_21_31_08_GFAP_GCamp6s_F6_PTZ",
     "20211119_16_36_20_GFAP_GCamp6s_F4_PTZ",
     # "20211119_18_15_06_GFAP_GCamp6s_F5_C",
     # "20211119_21_52_35_GFAP_GCamp6s_F7_C",
@@ -40,16 +40,17 @@ EXP_NAMES = [
     "20220412_13_59_55_GFAP_GCamp6s_F3_C",
     # "20220412_16_06_54_GFAP_GCamp6s_F4_PTZ",
 ]
-EXP_NAMES = [
+""" EXP_NAMES = [
     "20220604_15_00_04_HuC_GCamp6s_GFAP_jRGECO_F2_PTZ",
     # "20220604_16_24_03_HuC_GCamp6s_GFAP_jRGECO_F3_PTZ",
-]
+] """
 CROP_IDS = [
     "OpticTectum",
 ]
 
 USE_DENOISED = True
-USE_CHAN2 = True
+USE_CHAN2 = False
+USE_S2P_ROIS = False
 
 NAME_ROIS = "rois"
 
@@ -162,7 +163,11 @@ def main():
             if USE_DENOISED:
                 exp_dir = generate_denoised_dir(exp_dir, USE_CHAN2)
 
-            s2p_df, rois = load_s2p_df_rois(exp_dir, cfg)
+            s2p_df, rois = load_s2p_df_rois(
+                exp_dir,
+                cfg,
+                USE_S2P_ROIS,
+            )
 
             """
                 Debug

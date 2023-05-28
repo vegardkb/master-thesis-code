@@ -1,6 +1,6 @@
 import numpy as np
 from tqdm import tqdm
-import pickle
+import pandas as pd
 
 from fio import (
     load_cfg,
@@ -20,7 +20,6 @@ EXP_NAMES = [
     "20211112_13_23_43_GFAP_GCamp6s_F2_PTZ",
     "20211112_18_30_27_GFAP_GCamp6s_F5_c2",
     "20211112_19_48_54_GFAP_GCamp6s_F6_c3",
-    "20211117_21_31_08_GFAP_GCamp6s_F6_PTZ",
     "20211119_16_36_20_GFAP_GCamp6s_F4_PTZ",
     "20220211_13_18_56_GFAP_GCamp6s_F2_C",
     "20220211_16_51_15_GFAP_GCamp6s_F4_PTZ",
@@ -85,8 +84,10 @@ def main():
             cell_stat_dict["min_distance_to_midline"].append(min_distance_to_midline)
 
     results_dir = generate_global_results_dir()
-    with open(gen_pickle_fname(results_dir, STATS_FNAME), "wb") as f:
-        pickle.dump(cell_stat_dict, f)
+    df_cell_stat = pd.DataFrame(cell_stat_dict)
+    print(df_cell_stat.head())
+
+    df_cell_stat.to_pickle(gen_pickle_fname(results_dir, STATS_FNAME))
 
 
 if __name__ == "__main__":

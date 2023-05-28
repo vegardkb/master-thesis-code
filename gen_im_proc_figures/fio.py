@@ -11,12 +11,17 @@ import suite2p
 """
 
 OUT_NAME_CFG = "config.ini"
-NAME_ROIS = "rois"
 
 WORKING_DIR = os.path.join("..", "..", "..", "data")
-S2P_DIR = os.path.join("suite2p", "plane0")
 DENOISED_DIR = "denoised"
 DENOISED_CHAN2_DIR = "denoised_chan2"
+RESULTS_DIR = "results"
+PROTOCOL_DIR = os.path.join("..", "..", "..", "raw_data", "protocols")
+ROIS_DIR = "ROI"
+EVTS_DIR = "events"
+DFF_DIR = "dff"
+S2P_DIR = os.path.join("suite2p", "plane0")
+FIGURES_DIR = "figures"
 
 CFG_FORMAT = {
     "raw": {
@@ -46,7 +51,7 @@ class CIConfig:
         self.volume_rate = 0
         self.dtype = ""
 
-    def parse_cfg(self, cfg_path, format):
+    def parse_cfg(self, cfg_path, format, verbose=False):
         """
         Set values from config file (.ini)
         """
@@ -63,11 +68,14 @@ class CIConfig:
         self.n_frames = int(cfg_file.getfloat(hdr, fmt_dict["n_frames"]))
         self.volume_rate = cfg_file.getfloat(hdr, fmt_dict["volume_rate"])
 
-        print(f"\nInput shape: (Lx, Ly, Lt) = ({self.Lx}, {self.Ly}, {self.n_frames})")
-        print(f"volume_rate: {self.volume_rate} Hz\n")
+        if verbose:
+            print(
+                f"\nInput shape: (Lx, Ly, Lt) = ({self.Lx}, {self.Ly}, {self.n_frames})"
+            )
+            print(f"volume_rate: {self.volume_rate} Hz\n")
 
-    def parse_proc_cfg(self, cfg_path):
-        self.parse_cfg(cfg_path, "processed")
+    def parse_proc_cfg(self, cfg_path, verbose=False):
+        self.parse_cfg(cfg_path, "processed", verbose)
 
 
 def generate_exp_dir(exp_name: str, crop_id: str):
@@ -90,6 +98,37 @@ def generate_denoised_dir(exp_dir, use_chan2):
     return denoised_dir
 
 
+def generate_results_dir(exp_dir):
+    results_dir = os.path.join(exp_dir, RESULTS_DIR)
+    if not os.path.isdir(results_dir):
+        os.makedirs(results_dir)
+
+    return results_dir
+
+
+def generate_results_roi_dir(exp_dir, roi_number: str):
+    results_dir = generate_results_dir(exp_dir)
+    rois_dir = os.path.join(results_dir, ROIS_DIR + roi_number)
+    if not os.path.isdir(rois_dir):
+        os.makedirs(rois_dir)
+
+    return rois_dir
+
+
+def generate_roi_dff_dir(exp_dir, roi_number: str, roi_fname):
+    rois_dir = generate_results_roi_dir(exp_dir, roi_number)
+    dff_dir = os.path.join(rois_dir, DFF_DIR, roi_fname)
+    if not os.path.isdir(dff_dir):
+        os.makedirs(dff_dir)
+
+    return dff_dir
+
+
+def generate_processed_cfg_path(exp_dir):
+    cfg_path = os.path.join(exp_dir, OUT_NAME_CFG)
+    return cfg_path
+
+
 def generate_s2p_dir(exp_dir):
     s2p_dir = os.path.join(
         exp_dir,
@@ -99,6 +138,14 @@ def generate_s2p_dir(exp_dir):
         raise Exception(f"suite2p directory does not exist:\n{s2p_dir}")
 
     return s2p_dir
+
+
+def generate_figures_dir():
+    figures_dir = os.path.join(WORKING_DIR, FIGURES_DIR)
+    if not os.path.isdir(figures_dir):
+        os.makedirs(figures_dir)
+
+    return figures_dir
 
 
 def load_s2p_rois(s2p_df) -> List[Any]:
@@ -167,41 +214,42 @@ def load_s2p_df(exp_dir, Ly: int, Lx: int):
     return s2p_df
 
 
-def load_rois(s2p_df, exp_dir, use_s2p) -> List[Any]:
-    if not use_s2p:
-        print("Attempting to retrieve custom rois...")
-        custom_rois = load_custom_rois(exp_dir)
-        if custom_rois is not None:
-            return custom_rois
+def load_rois(s2p_df, exp_dir, rois_fname) -> List[Any]:
+    # print("Attempting to retrieve custom rois...")
+    custom_rois = load_custom_rois(exp_dir, rois_fname)
+    if custom_rois is not None:
+        return custom_rois
 
-    print(f"Reading rois from suite2p output...")
+    # print(f"Reading rois from suite2p output...")
     s2p_rois = load_s2p_rois(s2p_df)
     return s2p_rois
 
 
-def load_s2p_df_rois(exp_dir, cfg: CIConfig, use_s2p=False) -> Tuple[Any, Any]:
+def load_s2p_df_rois(exp_dir, cfg: CIConfig, rois_fname) -> Tuple[Any, Any]:
     s2p_df = load_s2p_df(exp_dir, cfg.Ly, cfg.Lx)
-    rois = load_rois(s2p_df, exp_dir, use_s2p)
+    rois = load_rois(s2p_df, exp_dir, rois_fname)
     return s2p_df, rois
 
 
-def load_cfg(exp_dir) -> CIConfig:
-    cfg_path = os.path.join(exp_dir, OUT_NAME_CFG)
+def load_cfg(exp_dir, verbose=False) -> CIConfig:
+    cfg_path = generate_processed_cfg_path(exp_dir)
     cfg = CIConfig()
-    cfg.parse_proc_cfg(cfg_path)
+    cfg.parse_proc_cfg(cfg_path, verbose)
     return cfg
 
 
-def generate_roi_path(exp_dir):
-    roi_path = os.path.join(
-        exp_dir,
-        NAME_ROIS + ".npy",
-    )
-    return roi_path
+def load_protocol(protocol_name):
+    protocol = {}
+    in_fname = os.path.join(PROTOCOL_DIR, protocol_name, protocol_name + ".mat")
+    prot_mat = h5py.File(in_fname, "r")
+
+    protocol["t_onset_light"] = np.squeeze(prot_mat["PTZresults"]["timeONSET"])
+
+    return protocol
 
 
-def load_custom_rois(exp_dir) -> List[Any]:
-    roi_path = generate_roi_path(exp_dir)
+def load_custom_rois(exp_dir, rois_fname) -> List[Any]:
+    roi_path = gen_npy_fname(exp_dir, rois_fname)
 
     try:
         rois = []
@@ -209,7 +257,7 @@ def load_custom_rois(exp_dir) -> List[Any]:
         for roi in rois_np:
             rois.append(roi)
 
-        print(f"Rois loaded from {roi_path}")
+        # print(f"Rois loaded from {roi_path}")
         return rois
 
     except OSError:
@@ -224,13 +272,3 @@ def load_custom_rois(exp_dir) -> List[Any]:
 
 def gen_npy_fname(output_dir, fname):
     return os.path.join(output_dir, fname + ".npy")
-
-
-def get_t(fs, n_frames, n_t_start_discard=0):
-    n_frames = n_frames - n_t_start_discard
-    return np.linspace(0, (n_frames - 1) / fs, n_frames)
-
-
-def save_rois(rois, exp_dir, name_rois):
-    roi_path = gen_npy_fname(exp_dir, name_rois)
-    np.save(roi_path, rois, allow_pickle=True)

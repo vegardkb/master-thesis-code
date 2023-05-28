@@ -16,12 +16,12 @@ from fio import (
     gen_npy_fname,
     gen_pickle_fname,
 )
+from sigproc import get_pos, calc_c_pos, calc_pos_pca0, get_reg_mask
 
 EXP_NAMES = [
     "20211112_13_23_43_GFAP_GCamp6s_F2_PTZ",
     "20211112_18_30_27_GFAP_GCamp6s_F5_c2",
     "20211112_19_48_54_GFAP_GCamp6s_F6_c3",
-    "20211117_21_31_08_GFAP_GCamp6s_F6_PTZ",
     "20211119_16_36_20_GFAP_GCamp6s_F4_PTZ",
     "20220211_13_18_56_GFAP_GCamp6s_F2_C",
     "20220211_16_51_15_GFAP_GCamp6s_F4_PTZ",
@@ -36,12 +36,14 @@ DFF_REGS_FNAME = "dff_light_response"
 SECOND_DERIVATIVE_FNAME = "d2xdt2_light_response"
 STATS_FNAME = "stats_light_response"
 T_ONSET_FNAME = "t_onsets_light_response"
+POS_REGS_FNAME = "pos_regs"
 
 DISTAL_REG = 0
 BUFFER_T = 5
 PRE_EVENT_T = 5
 POST_EVENT_T_PEAK = 40
-POST_STIM_T = 5
+POST_STIM_T_LAG = 10
+POST_STIM_T_EVENT = 5
 STIM_DURATION = 10
 
 DECAY_THRESHOLD = 0.8
@@ -51,12 +53,15 @@ USE_CHAN2 = False
 
 ISIS = [300]
 
-CELL_LENGTH = 55
+MICROM_PER_M = 1000000
+CELL_LENGTH = 50
 
 FREQ_CUT_OFF = 0.25
 FILTER_ORDER = 8
 
-N_REGIONS_LIST = [3, 6, 9]
+N_REGIONS_LIST = [3, 6]
+
+MAX_ROI_SIZE = 3500
 
 
 def arp_model_fit(x, p):
@@ -105,9 +110,8 @@ def create_column_names(num_regions):
         "t_peak_pearsonr",
         "t_onset_slope",
         "t_onset_pearsonr",
-        "t_lag_av_slope",
-        "t_lag_distal_slope",
-        "t_lag_distal_post_slope",
+        "t_lag_dff_slope",
+        "t_lag_res_slope",
         "prop_dist",
         "prop_origin",
     ]
@@ -116,15 +120,16 @@ def create_column_names(num_regions):
             "peak" + f"_r{reg_num}",
             "bl" + f"_r{reg_num}",
             "amp" + f"_r{reg_num}",
+            "amp25s" + f"_r{reg_num}",
             "t_peak" + f"_r{reg_num}",
             "t_decay" + f"_r{reg_num}",
             "t_constant_decay" + f"_r{reg_num}",
-            "t_lag_av" + f"_r{reg_num}",
-            "corr_av" + f"_r{reg_num}",
-            "t_lag_distal" + f"_r{reg_num}",
-            "corr_distal" + f"_r{reg_num}",
-            "t_lag_distal_post" + f"_r{reg_num}",
-            "corr_distal_post" + f"_r{reg_num}",
+            "t_lag_dff" + f"_r{reg_num}",
+            "corr_dff" + f"_r{reg_num}",
+            "limit_dff" + f"_r{reg_num}",
+            "t_lag_res" + f"_r{reg_num}",
+            "corr_res" + f"_r{reg_num}",
+            "limit_res" + f"_r{reg_num}",
             "acc_onset" + f"_r{reg_num}",
             "acc_middle" + f"_r{reg_num}",
             "acc_offset" + f"_r{reg_num}",
@@ -158,6 +163,8 @@ def create_empty_t_onsets_dict():
         "time_peak": [],
         "dxdt_end": [],
         "diff_dxdt": [],
+        "pre_dff": [],
+        "pre_bl_sub_dff": [],
         "peak": [],
         "region": [],
     }
@@ -196,17 +203,20 @@ def calc_peak_bl_amp(dff_reg, reg_mean_pos, fs):
 
     bl = np.mean(dff_bl, axis=0)
     peak = np.amax(dff_peak, axis=0)
+    dff25s = dff_reg[int((PRE_EVENT_T + 2.5) * fs)]
     neg = peak < bl
 
     if np.any(neg):
         peak[neg] = np.amin(dff_peak[:, neg], axis=0)
     amp = peak - bl
+    amp25s = dff25s - bl
 
     stats, names = [], []
     for reg_num in range(dff_reg.shape[1]):
         stats.append(bl[reg_num]), names.append(f"bl_r{reg_num}")
         stats.append(peak[reg_num]), names.append(f"peak_r{reg_num}")
         stats.append(amp[reg_num]), names.append(f"amp_r{reg_num}")
+        stats.append(amp25s[reg_num]), names.append(f"amp25s_r{reg_num}")
 
     amp_slope = linregress(reg_mean_pos, amp).slope
     prop_dist, prop_origin = propagation_dist(amp)
@@ -221,6 +231,22 @@ def subtract_baseline(dff_reg, fs):
     dff_bl = dff_reg[: int(PRE_EVENT_T * fs)]
     bl_sub_dff = dff_reg - np.mean(dff_bl, axis=0)
     return bl_sub_dff
+
+
+def get_region_pos(roi, cfg, num_reg):
+    pos = get_pos(cfg.Ly, cfg.Lx)
+    c_pos = calc_c_pos(roi, pos, cfg.Ly)
+    pos_pca0 = calc_pos_pca0(c_pos, cfg, MICROM_PER_M)
+    region_mask = get_reg_mask(pos_pca0, num_reg)
+    region_pos = (
+        np.zeros((pos.shape[0], region_mask.shape[0], region_mask.shape[1])) - 1
+    )
+    region_pos_z = np.zeros((pos.shape[0], region_mask.shape[0], MAX_ROI_SIZE)) - 1
+    for reg_num in range(region_mask.shape[0]):
+        region_pos[:, reg_num, region_mask[reg_num]] = c_pos[:, region_mask[reg_num]]
+
+    region_pos_z[:, :, : region_mask.shape[1]] = region_pos
+    return region_pos_z
 
 
 def calc_ts(dff_reg, reg_mean_pos, fs):
@@ -329,16 +355,13 @@ def propagation_dist(amp_reg):
     return prop_dists[argmax], prop_origins[argmax]
 
 
-def calc_lag_corr(x, x_ref, fs, max_lag=30):
-    mu_x = np.mean(x)
-    mu_ref = np.mean(x_ref)
-    norm_x = np.sqrt(np.sum(np.power(x - mu_x, 2)))
-    norm_ref = np.sqrt(np.sum(np.power(x_ref - mu_ref, 2)))
-    corr = signal.correlate(x - np.mean(x), x_ref - np.mean(x_ref), mode="same")
-    norm = norm_x * norm_ref
+def calc_lag_corr(x, x_ref, fs, max_lag=10):
+    x_norm = (x - np.mean(x)) / np.std(x)
+    x_ref_norm = (x_ref - np.mean(x_ref)) / np.std(x_ref)
+    n = x.shape[0]
+    corr = signal.correlate(x_norm, x_ref_norm, mode="same") / n
 
-    corr = corr / norm
-    lags = np.arange(x.shape[0]) / fs
+    lags = np.arange(n) / fs
     lags = lags - np.amax(lags) / 2
 
     lag_mask = np.absolute(lags) < max_lag
@@ -347,87 +370,57 @@ def calc_lag_corr(x, x_ref, fs, max_lag=30):
 
     lag_ind = np.argmax(corr)
 
-    """
-        Start debug
-    """
-    """ plt.figure()
-    plt.plot(x, label="x")
-    plt.plot(x_ref, label="x_ref")
-    plt.legend()
-
-    plt.figure()
-    plt.plot(lags, corr)
-    plt.ylabel("Corr")
-    plt.xlabel("Lag")
-    plt.show() """
-    """
-        End debug
-    """
-
-    return lags[lag_ind], corr[lag_ind]
+    return lags[lag_ind], corr[lag_ind], 2.33 / np.sqrt(n)  # 1.96 - 5%, 2.33 - 1%
 
 
 def calc_t_lag(dff_reg, reg_mean_pos, fs):
     num_regions = dff_reg.shape[1]
 
     dff_distal_whole = dff_reg[:, DISTAL_REG]
-    p = 25
+    p = 10
     phis = arp_model_fit(dff_distal_whole, p)
 
-    dff_onset = dff_reg[: int((PRE_EVENT_T + STIM_DURATION + POST_STIM_T) * fs)]
+    dff_onset = dff_reg[: int((PRE_EVENT_T + STIM_DURATION + POST_STIM_T_LAG) * fs)]
+
     dff_onset_res = np.array(
         [arp_model_res(dff_onset[:, reg_num], phis) for reg_num in range(num_regions)]
     ).T
 
-    dff_onset = dff_onset_res
+    dff_distal_res = dff_onset_res[p:, DISTAL_REG]
 
-    dff_av = np.mean(dff_onset[p:], axis=1)
-    dff_distal = dff_onset[p:, DISTAL_REG]
+    dff_distal = dff_onset[:, DISTAL_REG]
 
-    dff_post_onset = dff_onset[
-        int((PRE_EVENT_T + 2) * fs) : int((PRE_EVENT_T + 15) * fs)
-    ]
-    dff_post_distal = dff_post_onset[:, DISTAL_REG]
-
-    corr_av, t_lag_av = [], []
-    corr_distal, t_lag_distal = [], []
-    corr_distal_post, t_lag_distal_post = [], []
+    corr_dff, t_lag_dff, limit_dff = [], [], []
+    corr_res, t_lag_res, limit_res = [], [], []
 
     for reg_num in range(num_regions):
         dff = dff_onset[:, reg_num]
-        dff_post = dff_post_onset[:, reg_num]
+        dff_res = dff_onset_res[:, reg_num]
 
-        lag, corr = calc_lag_corr(dff, dff_av, fs)
-        t_lag_av.append(lag), corr_av.append(corr)
-        lag, corr = calc_lag_corr(dff, dff_distal, fs)
-        t_lag_distal.append(lag), corr_distal.append(corr)
-        lag, corr = calc_lag_corr(dff_post, dff_post_distal, fs)
-        t_lag_distal_post.append(lag), corr_distal_post.append(corr)
+        lag, corr, lim = calc_lag_corr(dff, dff_distal, fs)
+        t_lag_dff.append(lag), corr_dff.append(corr), limit_dff.append(lim)
+        lag, corr, lim = calc_lag_corr(dff_res, dff_distal_res, fs)
+        t_lag_res.append(lag), corr_res.append(corr), limit_res.append(lim)
 
     stats, names = [], []
     for reg_num in range(num_regions):
-        stats.append(corr_av[reg_num]), names.append(f"corr_av_r{reg_num}")
-        stats.append(t_lag_av[reg_num]), names.append(f"t_lag_av_r{reg_num}")
-        stats.append(corr_distal[reg_num]), names.append(f"corr_distal_r{reg_num}")
-        stats.append(t_lag_distal[reg_num]), names.append(f"t_lag_distal_r{reg_num}")
-        stats.append(corr_distal_post[reg_num]), names.append(
-            f"corr_distal_post_r{reg_num}"
-        )
-        stats.append(t_lag_distal_post[reg_num]), names.append(
-            f"t_lag_distal_post_r{reg_num}"
-        )
+        stats.append(corr_dff[reg_num]), names.append(f"corr_dff_r{reg_num}")
+        stats.append(t_lag_dff[reg_num]), names.append(f"t_lag_dff_r{reg_num}")
+        stats.append(limit_dff[reg_num]), names.append(f"limit_dff_r{reg_num}")
 
-    t_lag_av_slope = linregress(reg_mean_pos, t_lag_av).slope
-    t_lag_distal_slope = linregress(reg_mean_pos, t_lag_distal).slope
-    t_lag_distal_post_slope = linregress(reg_mean_pos, t_lag_distal_post).slope
-    stats.append(t_lag_av_slope), names.append("t_lag_av_slope")
-    stats.append(t_lag_distal_slope), names.append("t_lag_distal_slope")
-    stats.append(t_lag_distal_post_slope), names.append("t_lag_distal_post_slope")
+        stats.append(corr_res[reg_num]), names.append(f"corr_res_r{reg_num}")
+        stats.append(t_lag_res[reg_num]), names.append(f"t_lag_res_r{reg_num}")
+        stats.append(limit_res[reg_num]), names.append(f"limit_res_r{reg_num}")
+
+    t_lag_dff_slope = linregress(reg_mean_pos, t_lag_dff).slope
+    t_lag_res_slope = linregress(reg_mean_pos, t_lag_res).slope
+    stats.append(t_lag_dff_slope), names.append("t_lag_dff_slope")
+    stats.append(t_lag_res_slope), names.append("t_lag_res_slope")
 
     return stats, names
 
 
-def calc_t_onsets(d2xdt2, dxdt, reg_mean_pos, fs):
+def calc_t_onsets(d2xdt2, dff_reg, dxdt, reg_mean_pos, fs):
     t_onset_dict = {
         "time_com": [],
         "time_start": [],
@@ -435,6 +428,8 @@ def calc_t_onsets(d2xdt2, dxdt, reg_mean_pos, fs):
         "time_peak": [],
         "dxdt_end": [],
         "diff_dxdt": [],
+        "pre_dff": [],
+        "pre_bl_sub_dff": [],
         "peak": [],
         "region": [],
     }
@@ -442,20 +437,31 @@ def calc_t_onsets(d2xdt2, dxdt, reg_mean_pos, fs):
     stats, names = [], []
     num_regions = d2xdt2.shape[1]
 
+    dff_bl = dff_reg[: int(PRE_EVENT_T * fs)]
+
+    bl_reg = np.mean(dff_bl, axis=0)
+
     t_onsets = np.zeros(num_regions)
     for reg_num in range(num_regions):
         d2xdt2_onset = d2xdt2[
             int(PRE_EVENT_T * fs / 2) : int(
-                (PRE_EVENT_T + STIM_DURATION + POST_STIM_T) * fs
+                (PRE_EVENT_T + STIM_DURATION + POST_STIM_T_EVENT) * fs
             ),
             reg_num,
         ]
         dxdt_onset = dxdt[
             int(PRE_EVENT_T * fs / 2) : int(
-                (PRE_EVENT_T + STIM_DURATION + POST_STIM_T) * fs
+                (PRE_EVENT_T + STIM_DURATION + POST_STIM_T_EVENT) * fs
             ),
             reg_num,
         ]
+        dff_onset = dff_reg[
+            int(PRE_EVENT_T * fs / 2) : int(
+                (PRE_EVENT_T + STIM_DURATION + POST_STIM_T_EVENT) * fs
+            ),
+            reg_num,
+        ]
+        bl = bl_reg[reg_num]
 
         peaks, _ = signal.find_peaks(d2xdt2_onset, height=0.0001)
         midpoint_list = []
@@ -474,7 +480,7 @@ def calc_t_onsets(d2xdt2, dxdt, reg_mean_pos, fs):
 
                 if np.any(x_between < 0):
                     merge_list.append(False)
-                elif rel_diff_l > rel_diff_t or rel_diff_r > rel_diff_t:
+                elif rel_diff_l > rel_diff_t and rel_diff_r > rel_diff_t:
                     merge_list.append(False)
                 else:
                     merge_list.append(True)
@@ -546,6 +552,8 @@ def calc_t_onsets(d2xdt2, dxdt, reg_mean_pos, fs):
             t_onset_dict["time_peak"].append(t_peak)
             t_onset_dict["dxdt_end"].append(dxdt_onset[end_ind])
             t_onset_dict["diff_dxdt"].append(int_d2xdt2)
+            t_onset_dict["pre_dff"].append(dff_onset[start_ind])
+            t_onset_dict["pre_bl_sub_dff"].append(dff_onset[start_ind] - bl)
             t_onset_dict["peak"].append(d2xdt2_peak)
             t_onset_dict["region"].append(reg_num)
 
@@ -643,8 +651,10 @@ def process_roi(
     dff_regs,
     d2xdt2s,
     t_onsets_dict,
+    pos_regs,
     num_regions,
     fs,
+    region_pos,
 ):
 
     try:
@@ -661,7 +671,12 @@ def process_roi(
             )
         )
     except FileNotFoundError:
-        return results_dict, dff_regs, d2xdt2s, t_onsets_dict
+        path = gen_npy_fname(
+            dff_dir,
+            f"{ACTIVITY_FNAME}_{num_regions}_regions_light_response_ISI_{isi}",
+        )
+        print(f"Warning: file not found {path}")
+        return results_dict, dff_regs, d2xdt2s, t_onsets_dict, pos_regs
 
     num_evts = dff_evts.shape[0]
 
@@ -678,11 +693,11 @@ def process_roi(
         d2xdt2[3:-3] = second_derivative(dff_reg_filt, 1 / fs)
         dxdt = np.zeros(dff_reg_filt.shape)
         dxdt[3:-3] = first_derivative(dff_reg_filt, 1 / fs)
-        dff_regs.append(subtract_baseline(dff_reg, fs))
+        dff_regs.append(subtract_baseline(dff_reg_filt, fs))
         d2xdt2s.append(d2xdt2)
 
         t_onset_dict, stats_t_onset, names_t_onset = calc_t_onsets(
-            d2xdt2, dxdt, reg_mean_pos, fs
+            d2xdt2, dff_reg, dxdt, reg_mean_pos, fs
         )
         t_onset_dict = dump_meta_stats(
             t_onset_dict, exp_name, crop_id, roi_num, isi, ptz, evt_num
@@ -699,6 +714,8 @@ def process_roi(
         results_dict = concat_dicts(results_dict, result_dict)
         t_onsets_dict = concat_dicts(t_onsets_dict, t_onset_dict)
 
+        pos_regs.append(region_pos)
+
     column_lengths = []
     for key in results_dict.keys():
         col_len = len(results_dict[key])
@@ -710,7 +727,7 @@ def process_roi(
     if not np.all(column_lengths == column_lengths[0]):
         print("Not all columns are same length")
 
-    return results_dict, dff_regs, d2xdt2s, t_onsets_dict
+    return results_dict, dff_regs, d2xdt2s, t_onsets_dict, pos_regs
 
 
 def main():
@@ -727,6 +744,7 @@ def main():
         dff_regs = []
         d2xdt2s = []
         t_onsets_dict = create_empty_t_onsets_dict()
+        pos_regs = []
         for exp_name, crop_id in tqdm(exp_crop, desc="exp_crop", leave=False):
             ptz_exp = "ptz" in exp_name.lower()
             exp_dir = generate_exp_dir(exp_name, crop_id)
@@ -740,11 +758,18 @@ def main():
             n_rois = len(rois)
 
             for roi_num in tqdm(range(n_rois), desc="Roi", leave=False):
+                region_pos = get_region_pos(rois[roi_num], cfg, num_regions)
                 roi_num_str = str(roi_num)
                 dff_dir = generate_roi_dff_dir(exp_dir, roi_num_str, ROIS_FNAME)
 
                 for isi in ISIS:
-                    (results_dict, dff_regs, d2xdt2s, t_onsets_dict,) = process_roi(
+                    (
+                        results_dict,
+                        dff_regs,
+                        d2xdt2s,
+                        t_onsets_dict,
+                        pos_regs,
+                    ) = process_roi(
                         exp_name,
                         crop_id,
                         roi_num,
@@ -755,14 +780,18 @@ def main():
                         dff_regs,
                         d2xdt2s,
                         t_onsets_dict,
+                        pos_regs,
                         num_regions,
                         fs,
+                        region_pos,
                     )
 
         df_results = pd.DataFrame(results_dict)
+        print(df_results.head())
         df_t_onset = pd.DataFrame(t_onsets_dict)
         dff_regs = np.array(dff_regs)
         d2xdt2s = np.array(d2xdt2s)
+        pos_regs = np.array(pos_regs)
 
         df_results.to_pickle(
             gen_pickle_fname(results_dir, STATS_FNAME + f"_{num_regions}_regions")
@@ -779,6 +808,10 @@ def main():
                 results_dir, SECOND_DERIVATIVE_FNAME + f"_{num_regions}_regions"
             ),
             d2xdt2s,
+        )
+        np.save(
+            gen_npy_fname(results_dir, POS_REGS_FNAME + f"_{num_regions}_regions"),
+            pos_regs,
         )
 
 

@@ -1,37 +1,38 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
+from threading import Thread
 
 from fio import (
-    load_cfg,
-    load_s2p_df_rois,
-    get_t,
+    load_custom_rois,
     generate_exp_dir,
     generate_denoised_dir,
     save_rois,
 )
 
-from plotters import plot_frame, plot_rois
-
-from sigproc import (
-    get_mean_img_rgb,
-    get_pos,
-    spatial_distance,
-    activity_distance,
-)
-
-from uio import merge_suggest_gui
-
-
 EXP_NAMES = [
     "20211112_13_23_43_GFAP_GCamp6s_F2_PTZ",
+    "20211112_18_30_27_GFAP_GCamp6s_F5_c2",
+    "20211112_19_48_54_GFAP_GCamp6s_F6_c3",
+    # "20211117_14_17_58_GFAP_GCamp6s_F2_C",
+    # "20211117_17_33_00_GFAP_GCamp6s_F4_PTZ",
+    # "20211117_21_31_08_GFAP_GCamp6s_F6_PTZ",
+    "20211119_16_36_20_GFAP_GCamp6s_F4_PTZ",
+    # "20211119_18_15_06_GFAP_GCamp6s_F5_C",
+    # "20211119_21_52_35_GFAP_GCamp6s_F7_C",
     "20220211_13_18_56_GFAP_GCamp6s_F2_C",
+    # "20220211_15_02_16_GFAP_GCamp6s_F3_PTZ",
+    "20220211_16_51_15_GFAP_GCamp6s_F4_PTZ",
+    # "20220412_10_43_04_GFAP_GCamp6s_F1_PTZ",
+    "20220412_12_32_27_GFAP_GCamp6s_F2_PTZ",
+    "20220412_13_59_55_GFAP_GCamp6s_F3_C",
+    # "20220412_16_06_54_GFAP_GCamp6s_F4_PTZ",
 ]
 CROP_IDS = [
     "OpticTectum",
 ]
 
 USE_DENOISED = True
+USE_CHAN_2 = False
 NAME_ROIS = "rois_smooth"
 
 SIGMA = 0.9
@@ -168,20 +169,35 @@ def smooth_rois(rois, sigma, threshold):
     return new_rois
 
 
+def process_exp(exp_name, crop_id):
+    exp_dir = generate_exp_dir(exp_name, crop_id)
+
+    if USE_DENOISED:
+        exp_dir = generate_denoised_dir(exp_dir, USE_CHAN_2)
+
+    rois = load_custom_rois(exp_dir)
+
+    new_rois = smooth_rois(rois, SIGMA, THRESHOLD)
+
+    save_rois(new_rois, exp_dir, NAME_ROIS)
+
+
 def main():
+    ts = []
     for exp_name in EXP_NAMES:
         for crop_id in CROP_IDS:
-            exp_dir = generate_exp_dir(exp_name, crop_id)
-            cfg = load_cfg(exp_dir)
+            t = Thread(
+                target=process_exp,
+                args=(
+                    exp_name,
+                    crop_id,
+                ),
+            )
+            t.start()
+            ts.append(t)
 
-            if USE_DENOISED:
-                exp_dir = generate_denoised_dir(exp_dir)
-
-            s2p_df, rois = load_s2p_df_rois(exp_dir, cfg)
-
-            new_rois = smooth_rois(rois, SIGMA, THRESHOLD)
-
-            save_rois(new_rois, exp_dir, NAME_ROIS)
+    for t in ts:
+        t.join()
 
 
 if __name__ == "__main__":
