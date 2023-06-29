@@ -12,6 +12,7 @@ from scipy.stats import chi2, norm, ranksums
 from sklearn.metrics import log_loss
 from sklearn.cluster import KMeans
 import os
+import math
 
 from fio import (
     generate_global_results_dir,
@@ -99,10 +100,11 @@ PEAK_CAT_COLORS_DICT = {
 }
 
 
-T_ONSET_CAT_COLORS = (ORANGE, LIGHTBLUE, DARKGRAY)
+T_ONSET_CAT_COLORS = (ORANGE, LIGHTBLUE, DARKBLUE, DARKGRAY)
 T_ONSET_CAT_COLORS_DICT = {
     "synchronized": ORANGE,
     "calcium_wave": LIGHTBLUE,
+    "calcium_wave_r": DARKBLUE,
     "undefined": DARKGRAY,
 }
 
@@ -163,6 +165,11 @@ def get_region_colors(num_regs):
     return REG_CM(np.linspace(0.2, 1, num_regs))
 
 
+def get_region_colors_weighted(w, cmap, vmin=0, vmax=1):
+    w = (w - np.amin(w) + vmin) * vmax / np.amax(w)
+    return cmap(w)
+
+
 def get_group_labels():
     return ["Control", "PTZ"]
 
@@ -181,6 +188,35 @@ def get_sample_size(df, mask):
     sample_size_str += f"\nnum trials = {np.sum(mask)}"
 
     return sample_size_str
+
+
+def print_prop_speed(df, mask):
+    df_mask = df[mask]
+
+    speed = 1 / df_mask["t_onset_slope"]  # micrometer/sec
+
+    mean_speed = speed.mean()
+    std_speed = speed.std()
+
+    print(f"Speed all : {mean_speed} +- {std_speed}")
+
+    speed_groups = []
+
+    for g_label, g_mask in zip(
+        ["Control", "PTZ"], [df_mask["ptz"] == False, df_mask["ptz"] == True]
+    ):
+        g_speed = speed[g_mask]
+        speed_groups.append(g_speed)
+
+        mean_speed = g_speed.mean()
+        std_speed = g_speed.std()
+
+        print(f"Speed {g_label} : {mean_speed} +- {std_speed}")
+
+    rs_result = ranksums(speed_groups[0], speed_groups[1])
+    p_val = rs_result.pvalue
+
+    print(f"P-value group difference : {p_val}")
 
 
 def ctrl_ptz_mask(df):
@@ -338,13 +374,11 @@ def get_t_onset_masks(df, num_regs):
     distal_reg = 0
     proximal_reg = num_regs - 1
     middle_reg = int((distal_reg + proximal_reg) / 2)
-
-    """ lon_s, lon_e = -0.5, 4
-    loff_s, loff_e = 9.5, 14 """
     lon_s, lon_e = 0, 4
     loff_s, loff_e = 10, 14
 
     mean_t, med_t = 0, 0
+    r_t = 0.25
 
     for reg_d, reg_p in zip(range(num_regs - 1), range(1, num_regs)):
         df[f"t_onset_lag_{reg_d}_{reg_p}"] = (
@@ -377,17 +411,32 @@ def get_t_onset_masks(df, num_regs):
             ((t_onset_reg < lon_e) & (t_onset_reg > lon_s))
             | ((t_onset_reg < loff_e) & (t_onset_reg > loff_s))
         )
-    """ wave = ~sync & (
-        (df["t_onset_lag_mean"] > mean_t)  # & ((df["t_onset_lag_median"] > med_t))
-    ) """
     wave = ~sync & (
-        (df[f"t_onset_r{distal_reg}"] < 10) & (df["t_onset_lag_median"] > med_t)
+        (df[f"t_onset_r{distal_reg}"] < 10)
+        & (df["t_onset_lag_median"] > med_t)
+        & (df["t_onset_lag_mean"] > mean_t)
+        & (df["t_onset_rsq"] > r_t)
     )
-    undefined = ~wave & ~sync
+    wave_r = (
+        ~wave
+        & ~sync
+        & (
+            (df[f"t_onset_r{proximal_reg}"] < 10)
+            & (df["t_onset_lag_median"] < med_t)
+            & (df["t_onset_lag_mean"] < mean_t)
+            & (df["t_onset_rsq"] > r_t)
+        )
+    )
+    undefined = ~wave & ~sync & ~wave_r
 
-    category_masks = [sync, wave, undefined]
-    category_labels = ["synchronized", "calcium_wave", "undefined"]
-    categor_labels_pretty = ["synchronized", "calcium-wave", "undefined"]
+    category_masks = [sync, wave, wave_r, undefined]
+    category_labels = ["synchronized", "calcium_wave", "calcium_wave_r", "undefined"]
+    categor_labels_pretty = [
+        "synchronized",
+        "calcium-wave",
+        "calcium-wave\nreverse",
+        "undefined",
+    ]
 
     return category_masks, category_labels, categor_labels_pretty
 
@@ -560,20 +609,20 @@ def plot_light_on_off(ax, lw=0.7, ymin=0.05, ymax=0.95):
     )
 
 
-def plot_amp_times(ax, x, amp4s_color, amp14s_color, lw=0.7):
+def plot_amp_times(ax, x, amp5s_color, amp15s_color, lw=0.7):
     ax.axvline(
-        4,
+        5,
         np.amin(x),
         np.amax(x),
-        color=amp4s_color,
+        color=amp5s_color,
         alpha=0.75,
         linewidth=lw,
     )
     ax.axvline(
-        14,
+        15,
         np.amin(x),
         np.amax(x),
-        color=amp14s_color,
+        color=amp15s_color,
         alpha=0.75,
         linewidth=lw,
     )
@@ -784,6 +833,10 @@ def scatter_hist(x, y, ax, ax_histx, ax_histy, binsize, s, color, alpha, label):
     ax_histx.plot(x_0, x_num, color=color)
     ax_histy.plot(y_num, y_0, color=color)
 
+    xnum_max = max(x_num)
+    ynum_max = max(y_num)
+    return xnum_max, ynum_max
+
 
 def plot_scatter_hist_categories(
     df,
@@ -800,6 +853,7 @@ def plot_scatter_hist_categories(
     size_col=None,
     size_lim=None,
     mixreg=False,
+    tick_inc=10,
 ):
     fig = plt.figure()
     gs = fig.add_gridspec(
@@ -822,12 +876,14 @@ def plot_scatter_hist_categories(
     dot_alpha = 0.5
     line_alpha = 0.8
 
+    xmaxes, ymaxes = [], []
+
     for ind_cat, cat_mask, cat_name, color in zip(
         range(len(cat_masks)), cat_masks, cat_names, colors
     ):
         df_cat = df[cat_mask]
         if percent:
-            scatter_hist(
+            xmax, ymax = scatter_hist(
                 df_cat[x_col] * 100,
                 df_cat[y_col] * 100,
                 ax,
@@ -840,7 +896,7 @@ def plot_scatter_hist_categories(
                 cat_name,
             )
         else:
-            scatter_hist(
+            xmax, ymax = scatter_hist(
                 df_cat[x_col],
                 df_cat[y_col],
                 ax,
@@ -852,7 +908,7 @@ def plot_scatter_hist_categories(
                 dot_alpha,
                 cat_name,
             )
-
+        xmaxes.append(xmax), ymaxes.append(ymax)
         if mixreg:
             x = np.array([df_cat[x_col].min(), df_cat[x_col].max()])
             a = np.ones(x.shape) * ind_cat
@@ -881,6 +937,16 @@ def plot_scatter_hist_categories(
     ax.set_xticks(x_ticks)
     ax.set_yticks(y_ticks)
 
+    histx_ticks = [
+        i * tick_inc for i in range(max(1, math.ceil(max(xmaxes) / tick_inc) + 1))
+    ]
+    histy_ticks = [
+        i * tick_inc for i in range(max(1, math.ceil(max(ymaxes) / tick_inc) + 1))
+    ]
+
+    ax_histx.set_yticks(histx_ticks)
+    ax_histy.set_xticks(histy_ticks)
+
     ax.legend(loc="upper left")
     if labels is None:
         ax.set_xlabel(x_col)
@@ -889,10 +955,11 @@ def plot_scatter_hist_categories(
         ax.set_xlabel(labels[0])
         ax.set_ylabel(labels[1])
 
+    ax_histx.set_ylabel("# Trials")
+    ax_histy.set_xlabel("# Trials")
+
     ax_histx.axhline(color="darkgray", alpha=0.7)
     ax_histy.axvline(color="darkgray", alpha=0.7)
-    ax_histx.set_yticks([0, 10])
-    ax_histy.set_xticks([0, 10])
 
     if xlim is not None:
         ax.set_xlim(xlim[0], xlim[1])
@@ -984,6 +1051,7 @@ def plot_split_bar(
     split_mask,
     colors,
     test_sig=False,
+    scale=1,
 ):
     num_cat = len(labels)
     ns = []
@@ -994,7 +1062,11 @@ def plot_split_bar(
 
         for i, mask in enumerate(masks):
             for j, name in enumerate(unique_names):
-                n[i, j] = np.sum(mask & (exp_names == name)) / np.sum(exp_names == name)
+                n[i, j] = (
+                    np.sum(mask & (exp_names == name))
+                    / np.sum(exp_names == name)
+                    * scale
+                )
 
         ns.append(n)
 
@@ -1074,6 +1146,71 @@ def plot_split_bar(
     ax.set_ylabel("Frequency of category")
     ax.legend()
     plt.tight_layout()
+
+
+def reg_analysis(
+    exp_names: pd.Series,
+    masks,
+    labels,
+    split_mask,
+    split_labels,
+    colors,
+    scale=1,
+):
+    num_cat = len(labels)
+    ys = []
+    xs = []
+    for s_mask in [split_mask, ~split_mask]:
+        s_exp_names = exp_names[s_mask]
+        unique_names = s_exp_names.unique()
+        y = np.zeros((num_cat, len(unique_names)))
+        x = np.zeros((num_cat, len(unique_names)))
+
+        for i, mask in enumerate(masks):
+            for j, name in enumerate(unique_names):
+                y[i, j] = (
+                    np.sum(mask & (exp_names == name))
+                    / np.sum(exp_names == name)
+                    * scale
+                )
+                x[i, j] = i
+
+        ys.append(y.reshape(-1))
+        xs.append(x.reshape(-1))
+
+    _, ax = plt.subplots()
+
+    print("\nTest slope non-zero:")
+    sig_str = ""
+    rng = np.random.default_rng()
+    for x, y, color, s_label in zip(xs, ys, colors, split_labels):
+        lin_res = stats.linregress(x, y)
+
+        print(f"pvalue {s_label}: {lin_res.pvalue}")
+        sig = assess_significance(lin_res.pvalue)
+
+        num_dots = x.shape[0]
+
+        ax.scatter(
+            x + (rng.random(num_dots) - 0.5) / 4,
+            y,
+            s=MARKER_SIZE,
+            color=color,
+            alpha=MARKER_ALPHA,
+            label=s_label,
+        )
+
+        ax.plot(
+            [x[0], x[-1]],
+            [lin_res.intercept, lin_res.intercept + lin_res.slope * x[-1]],
+            color=color,
+            alpha=MARKER_ALPHA,
+            linestyle="dashed",
+        )
+
+    ax.set_ylabel("Frequency of calcium wave")
+    ax.set_xticks(np.arange(num_cat), labels)
+    ax.legend()
 
 
 def plot_split_bar_ptz(ptz, var_list, var_name_list, ylabel, ylim=None):
@@ -1166,8 +1303,96 @@ def plot_split_bar_ptz(ptz, var_list, var_name_list, ylabel, ylim=None):
     plt.tight_layout()
 
 
+def plot_slope_plot(
+    df,
+    x_col,
+    y_col,
+    colors,
+    cat_masks,
+    cat_names,
+):
+
+    x = df[x_col]
+    y = df[y_col]
+
+    fig, ax = plt.subplots()
+    for c_mask, c_name, color in zip(cat_masks, cat_names, colors):
+        x_c = x[c_mask]
+        y_c = y[c_mask]
+        ax.plot(
+            [0, 1],
+            [x_c.mean(), y_c.mean()],
+            color=color,
+            label=c_name,
+            marker="o",
+            alpha=0.8,
+        )
+
+        for x_p, y_p in zip(x_c, y_c):
+            ax.plot([0, 1], [x_p, y_p], color=color, alpha=0.1)
+
+    plt.legend()
+    ax.set_ylabel("Amplitude")
+    ax.set_xlabel("Region")
+    ax.set_xticks([0, 1], ["Distal", "Proximal"])
+
+
 def plot_pos_reg(pos_reg, num_regs):
     reg_colors = get_region_colors(num_regs)
+    marker_size = 0.1
+    marker_alpha = 0.8
+
+    _, ax = plt.subplots()
+
+    for reg_num in range(num_regs):
+        mask = pos_reg[0, reg_num] >= 0
+        ax.scatter(
+            pos_reg[1, reg_num, mask],
+            pos_reg[0, reg_num, mask],
+            s=marker_size,
+            alpha=marker_alpha,
+            color=reg_colors[reg_num],
+            marker="s",
+        )
+
+    ax.set_xlabel("Micrometers")
+    ax.set_ylabel("Micrometers")
+
+    ymin, ymax = ax.get_ylim()
+    xmin, xmax = ax.get_xlim()
+    dy, dx = ymax - ymin, xmax - xmin
+
+    if dy > dx:
+        diff = dy - dx
+        pad = int(diff / 2)
+        ax.set_xlim(xmin - pad, xmax + pad)
+
+    elif dy < dx:
+        diff = -dy + dx
+        pad = int(diff / 2)
+        ax.set_ylim(ymin - pad, ymax + pad)
+
+    bar_width = 1
+    bar_size = 20  # micrometers
+    loc = "lower right"
+    asb = AnchoredSizeBar(
+        ax.transData,
+        size=bar_size,
+        size_vertical=bar_width,
+        label=f"{bar_size} \u03bcm",
+        loc=loc,
+        pad=0.1,
+        borderpad=1,
+        frameon=False,
+        color="black",
+    )
+    ax.add_artist(asb)
+
+    ax.axis("off")
+
+
+def plot_pos_reg_weighted(pos_reg, num_regs, weigth, cmap=cm.inferno):
+    reg_colors = get_region_colors_weighted(weigth, cmap)
     marker_size = 0.1
     marker_alpha = 0.8
 
@@ -1485,7 +1710,15 @@ def plot_trace(
 
 
 def plot_heatmap(
-    dff, mask, title=None, cmap=cm.inferno, t_max=None, norm=False, light_lw=0.5
+    dff,
+    mask,
+    title=None,
+    cmap=cm.inferno,
+    t_max=None,
+    norm=False,
+    include_baseline=False,
+    bl=None,
+    light_lw=0.5,
 ):
     dff_regs = dff[mask]
     av_dff = np.mean(dff_regs, axis=0) * 100
@@ -1504,6 +1737,9 @@ def plot_heatmap(
     if norm:
         dyn_range = np.amax(av_dff, axis=0) - np.amin(av_dff, axis=0)
         av_dff = av_dff / dyn_range
+
+    if include_baseline:
+        av_dff = av_dff + np.flip(bl)
 
     fig, ax = plt.subplots(frameon=False)
     divider = make_axes_locatable(ax)
@@ -1928,7 +2164,7 @@ def amp_regions_generating_code(num_regs, results_dir, fig_dir):
 
     set_fig_size(0.8, 0.7)
     for group, g_mask in zip(["Control", "PTZ"], [ctrl_mask, ptz_mask]):
-        plot_trace(dff, g_mask, plot_std=True, ylim=(-25, 150))
+        plot_trace(dff, g_mask, plot_std=True, ylim=(-50, 200))
         save_fig(fig_dir, f"trace_av_std_{group}")
         plot_trace(dff, g_mask, plot_sem=True, ylim=(-25, 150))
         save_fig(fig_dir, f"trace_av_sem_{group}")
@@ -1967,6 +2203,17 @@ def amp_regions_generating_code(num_regs, results_dir, fig_dir):
         mixreg=mixreg,
     )
     save_fig(fig_dir, "amp_scatter_hist_distal_proximal_ptz_ctrl")
+
+    set_fig_size(0.8, 1)
+    plot_slope_plot(
+        df_stat,
+        f"amp_r{distal_reg}",
+        f"amp_r{proximal_reg}",
+        CTRL_PTZ_COLORS,
+        (ctrl_mask, ptz_mask),
+        ("Control", "PTZ"),
+    )
+    save_fig(fig_dir, "amp_slope_distal_proximal_ptz_ctrl")
 
     """ for trial_num in range(5):
         mask = df_stat["evt_num"] == trial_num
@@ -2524,7 +2771,7 @@ def t_onset_regions_generating_code(num_regs, results_dir, fig_dir):
     size_col = "diff_dxdt"
 
     reg_colors = get_region_colors(num_regs)
-    s_all = np.array(get_dot_size(df_t_onsets, size_col, [0.1, 10], logarithmic=False))
+    s_all = np.array(get_dot_size(df_t_onsets, size_col, [0.1, 30], logarithmic=False))
 
     masks, labels, labels_pretty = get_t_onset_masks(df_stat, num_regs)
     onset_masks = [
@@ -2604,6 +2851,32 @@ def t_onset_regions_generating_code(num_regs, results_dir, fig_dir):
     )
     save_fig(fig_dir, "category_bar")
 
+    plot_scatter_categories(
+        df_stat,
+        "t_onset_slope",
+        "t_onset_rsq",
+        T_ONSET_CAT_COLORS,
+        masks,
+        labels_pretty,
+    )
+    save_fig(fig_dir, "t_slope_vs_rsquared")
+    for g_label, g_mask_stat in zip(["Control", "PTZ"], [ctrl_mask, ptz_mask]):
+        plot_scatter_categories(
+            df_stat,
+            "t_onset_slope",
+            "t_onset_rsq",
+            T_ONSET_CAT_COLORS,
+            masks,
+            labels_pretty,
+            mask_mask=g_mask_stat,
+        )
+        save_fig(fig_dir, f"t_slope_vs_rsquared_{g_label}")
+
+    print_prop_speed(df_stat, masks[1])
+
+    print("\nReverse:")
+    print_prop_speed(df_stat, masks[2])
+
     """ plot_cell_overview(df_stat, "t_onset_cat", T_ONSET_CAT_COLORS_DICT)
     save_fig(fig_dir, "category_overview") """
 
@@ -2632,6 +2905,22 @@ def t_onset_regions_generating_code(num_regs, results_dir, fig_dir):
     )
     save_fig(fig_dir, "amp_evt_size") """
 
+    wave_evt_num_masks = []
+    for evt_num in range(5):
+        wave_evt_num_masks.append(masks[1] & (df_stat["evt_num"] == evt_num))
+
+    set_fig_size(0.7, 0.8)
+    reg_analysis(
+        df_stat["exp_name"],
+        wave_evt_num_masks,
+        [f"Trial {i+1}" for i in range(5)],
+        ctrl_mask,
+        ["Control", "PTZ"],
+        CTRL_PTZ_COLORS,
+        scale=5,
+    )
+    save_fig(fig_dir, "wave_freq_trial")
+
 
 def amp_t_onset_generating_code(num_regs, results_dir, fig_dir):
     distal_reg = 0
@@ -2640,23 +2929,15 @@ def amp_t_onset_generating_code(num_regs, results_dir, fig_dir):
 
     df_stat = load_pickle(results_dir, STATS_FNAME, num_regs)
     df_stat_3 = load_pickle(results_dir, STATS_FNAME, 3)
-    dff = load_np(results_dir, DFF_REGS_FNAME, num_regs)
 
     masks, labels, labels_pretty = get_t_onset_masks(df_stat, num_regs)
-    xlim = (
-        df_stat_3[f"amp_r{distal_reg}"].min() * 100 - 5,
-        df_stat_3[f"amp_r{distal_reg}"].max() * 100 + 5,
-    )
-    ylim = (
-        df_stat_3[f"amp_r{2}"].min() * 100 - 5,
-        df_stat_3[f"amp_r{2}"].max() * 100 + 5,
-    )
 
     df_stat_3["t_onset_cat"] = ""
     for mask, label in zip(masks, labels):
         df_stat_3.loc[mask, "t_onset_cat"] = label
 
     set_fig_size(0.7, 1)
+    print("\namp\n")
     for ptz in [False, True]:
         group = "ptz" if ptz else "Control"
         print(f"\n{group}")
@@ -2672,32 +2953,12 @@ def amp_t_onset_generating_code(num_regs, results_dir, fig_dir):
         mixreg, _, y_mix = linear_mixed_model(x, a, y)
         p = likelihood_ratio_test(x, a, y)
         print(f"likelihood-ratio-test: {p}")
-        rsq_mix = rsquared(y, y_mix)
 
         rs_distal = ranksums(x[a], x[np.logical_not(a)])
         rs_proximal = ranksums(y[a], y[np.logical_not(a)])
 
         print(f"rank-sum distal amp: {rs_distal.pvalue}")
         print(f"rank-sum proximal amp: {rs_proximal.pvalue}")
-
-        plot_scatter_categories(
-            df_stat_light_seq,
-            f"amp_r{distal_reg}",
-            f"amp_r{2}",
-            (T_ONSET_CAT_COLORS[0], T_ONSET_CAT_COLORS[1]),
-            (masks[0], masks[1]),
-            (labels_pretty[0], labels_pretty[1]),
-            labels=(
-                r"Distal amplitude $\Delta F / F_0$ [%]",
-                r"Proximal amplitude $\Delta F / F_0$ [%]",
-            ),
-            percent=True,
-            title=f"p-value = {p:.03g}, R^2 = {rsq_mix:.03g}",
-            mixreg=mixreg,
-            xlim=xlim,
-            ylim=ylim,
-        )
-        save_fig(fig_dir, f"amp_scatter_distal_proximal_sync_wave_{group}")
 
         plot_scatter_hist_categories(
             df_stat_light_seq,
@@ -2718,31 +2979,161 @@ def amp_t_onset_generating_code(num_regs, results_dir, fig_dir):
         )
         save_fig(fig_dir, f"amp_scatter_hist_distal_proximal_sync_wave_{group}")
 
-    """ masks, labels, labels_pretty = get_amp_t_onset_masks(
-        df_stat, df_stat_3, num_regs, 3
-    )
+        set_fig_size(0.8, 1)
+        plot_slope_plot(
+            df_stat_light_seq,
+            f"amp_r{distal_reg}",
+            f"amp_r{2}",
+            (T_ONSET_CAT_COLORS[0], T_ONSET_CAT_COLORS[1]),
+            (masks[0], masks[1]),
+            (labels_pretty[0], labels_pretty[1]),
+        )
+        save_fig(fig_dir, f"amp_slope_distal_proximal_{group}")
 
-    plot_split_bar(
-        df_stat["exp_name"],
-        masks,
-        labels_pretty,
-        df_stat["ptz"] == False,
-        CTRL_PTZ_COLORS,
-        test_sig=True,
-    )
-    save_fig(fig_dir, "category_bar")
-
-    set_fig_size(0.48, 0.7)
-    ylims = [(-40, 100), (-20, 250)]
-    for ptz, ylim in zip([False, True], ylims):
+    sfig_dir = os.path.join(fig_dir, "5_15s")
+    print("\namp5s\n")
+    for ptz in [False, True]:
         group = "ptz" if ptz else "Control"
-        group_mask_stat = df_stat["ptz"] == ptz
-        for mask, label in zip(masks, labels):
-            group_label = group + "_" + label
-            c_mask = mask & group_mask_stat
+        print(f"\n{group}")
 
-            plot_trace(dff, c_mask, ylim=ylim, t_max=60)
-            save_fig(fig_dir, f"trace_{group_label}") """
+        light_seq_mask = np.logical_and(
+            np.logical_or(masks[0], masks[1]), df_stat_3["ptz"] == ptz
+        )
+        df_stat_light_seq = df_stat_3[light_seq_mask]
+        x = df_stat_light_seq[f"amp5s_r{distal_reg}"].to_numpy()
+        y = df_stat_light_seq[f"amp5s_r{2}"].to_numpy()
+        a = (df_stat_light_seq["t_onset_cat"] == "calcium_wave").to_numpy()
+
+        mixreg, _, y_mix = linear_mixed_model(x, a, y)
+        p = likelihood_ratio_test(x, a, y)
+        print(f"likelihood-ratio-test: {p}")
+
+        rs_distal = ranksums(x[a], x[np.logical_not(a)])
+        rs_proximal = ranksums(y[a], y[np.logical_not(a)])
+
+        print(f"rank-sum distal amp: {rs_distal.pvalue}")
+        print(f"rank-sum proximal amp: {rs_proximal.pvalue}")
+
+        plot_scatter_hist_categories(
+            df_stat_light_seq,
+            f"amp5s_r{distal_reg}",
+            f"amp5s_r{2}",
+            (T_ONSET_CAT_COLORS[0], T_ONSET_CAT_COLORS[1]),
+            (masks[0], masks[1]),
+            (labels_pretty[0], labels_pretty[1]),
+            labels=(
+                r"Distal amplitude $\Delta F / F_0$ [%]",
+                r"Proximal amplitude $\Delta F / F_0$ [%]",
+            ),
+            binsize=15,
+            percent=True,
+            mixreg=mixreg,
+            xlim=(-130, 290),
+            ylim=(-110, 520),
+        )
+        save_fig(sfig_dir, f"amp5s_scatter_hist_distal_proximal_sync_wave_{group}")
+
+    """ print("\namp15s\n")
+    for ptz in [False, True]:
+        group = "ptz" if ptz else "Control"
+        print(f"\n{group}")
+
+        light_seq_mask = np.logical_and(
+            np.logical_or(masks[0], masks[1]), df_stat_3["ptz"] == ptz
+        )
+        df_stat_light_seq = df_stat_3[light_seq_mask]
+        x = df_stat_light_seq[f"amp15s_r{distal_reg}"].to_numpy()
+        y = df_stat_light_seq[f"amp15s_r{2}"].to_numpy()
+        a = (df_stat_light_seq["t_onset_cat"] == "calcium_wave").to_numpy()
+
+        mixreg, _, y_mix = linear_mixed_model(x, a, y)
+        p = likelihood_ratio_test(x, a, y)
+        print(f"likelihood-ratio-test: {p}")
+
+        rs_distal = ranksums(x[a], x[np.logical_not(a)])
+        rs_proximal = ranksums(y[a], y[np.logical_not(a)])
+
+        print(f"rank-sum distal amp: {rs_distal.pvalue}")
+        print(f"rank-sum proximal amp: {rs_proximal.pvalue}")
+
+        plot_scatter_hist_categories(
+            df_stat_light_seq,
+            f"amp15s_r{distal_reg}",
+            f"amp15s_r{2}",
+            (T_ONSET_CAT_COLORS[0], T_ONSET_CAT_COLORS[1]),
+            (masks[0], masks[1]),
+            (labels_pretty[0], labels_pretty[1]),
+            labels=(
+                r"Distal amplitude $\Delta F / F_0$ [%]",
+                r"Proximal amplitude $\Delta F / F_0$ [%]",
+            ),
+            binsize=15,
+            percent=True,
+            mixreg=mixreg,
+            xlim=(-130, 290),
+            ylim=(-110, 520),
+        )
+        save_fig(sfig_dir, f"amp15s_scatter_hist_distal_proximal_sync_wave_{group}") """
+
+
+def bl_t_onset_generating_code(num_regs, results_dir, fig_dir):
+    distal_reg = 0
+    proximal_reg = num_regs - 1
+    fig_dir = os.path.join(fig_dir, "bl_time")
+
+    df_stat = load_pickle(results_dir, STATS_FNAME, num_regs)
+    df_stat_3 = load_pickle(results_dir, STATS_FNAME, 3)
+
+    masks, labels, labels_pretty = get_t_onset_masks(df_stat, num_regs)
+
+    df_stat_3["t_onset_cat"] = ""
+    for mask, label in zip(masks, labels):
+        df_stat_3.loc[mask, "t_onset_cat"] = label
+
+    set_fig_size(0.7, 1)
+    print("\nbl\n")
+    for ptz in [False, True]:
+        group = "ptz" if ptz else "Control"
+        print(f"\n{group}")
+
+        light_seq_mask = np.logical_and(
+            np.logical_or(masks[0], masks[1]), df_stat_3["ptz"] == ptz
+        )
+        df_stat_light_seq = df_stat_3[light_seq_mask]
+        x_col = f"bl_r{distal_reg}"
+        y_col = f"bl_r{2}"
+        x = df_stat_light_seq[x_col].to_numpy()
+        y = df_stat_light_seq[y_col].to_numpy()
+        a = (df_stat_light_seq["t_onset_cat"] == "calcium_wave").to_numpy()
+
+        mixreg, _, y_mix = linear_mixed_model(x, a, y)
+        p = likelihood_ratio_test(x, a, y)
+        print(f"likelihood-ratio-test: {p}")
+
+        rs_distal = ranksums(x[a], x[np.logical_not(a)])
+        rs_proximal = ranksums(y[a], y[np.logical_not(a)])
+
+        print(f"rank-sum distal amp: {rs_distal.pvalue}")
+        print(f"rank-sum proximal amp: {rs_proximal.pvalue}")
+
+        plot_scatter_hist_categories(
+            df_stat_light_seq,
+            x_col,
+            y_col,
+            (T_ONSET_CAT_COLORS[0], T_ONSET_CAT_COLORS[1]),
+            (masks[0], masks[1]),
+            (labels_pretty[0], labels_pretty[1]),
+            labels=(
+                r"Distal baseline $\Delta F / F_0$ [%]",
+                r"Proximal baseline $\Delta F / F_0$ [%]",
+            ),
+            binsize=15,
+            percent=True,
+            mixreg=mixreg,
+            xlim=(-130, 290),
+            ylim=(-110, 520),
+        )
+        save_fig(fig_dir, f"bl_scatter_hist_distal_proximal_sync_wave_{group}")
 
 
 def peak_t_onset_generating_code(num_regs, results_dir, fig_dir):
@@ -2769,21 +3160,30 @@ def peak_t_onset_generating_code(num_regs, results_dir, fig_dir):
         df_stat_3.loc[mask, "t_onset_cat"] = label
 
     set_fig_size(0.7, 1)
+    print("\npeak\n")
     for ptz in [False, True]:
         group = "ptz" if ptz else "Control"
+        print(f"\n{group}")
+
         light_seq_mask = np.logical_and(
             np.logical_or(masks[0], masks[1]), df_stat_3["ptz"] == ptz
         )
         df_stat_light_seq = df_stat_3[light_seq_mask]
         x = df_stat_light_seq[f"peak_r{distal_reg}"].to_numpy()
         y = df_stat_light_seq[f"peak_r{2}"].to_numpy()
-        a = (df_stat_light_seq["t_onset_cat"] == "sequential").to_numpy()
+        a = (df_stat_light_seq["t_onset_cat"] == "calcium_wave").to_numpy()
 
         mixreg, _, y_mix = linear_mixed_model(x, a, y)
         p = likelihood_ratio_test(x, a, y)
-        rsq_mix = rsquared(y, y_mix)
+        print(f"likelihood-ratio-test: {p}")
 
-        plot_scatter_categories(
+        rs_distal = ranksums(x[a], x[np.logical_not(a)])
+        rs_proximal = ranksums(y[a], y[np.logical_not(a)])
+
+        print(f"rank-sum distal peak: {rs_distal.pvalue}")
+        print(f"rank-sum proximal peak: {rs_proximal.pvalue}")
+
+        plot_scatter_hist_categories(
             df_stat_light_seq,
             f"peak_r{distal_reg}",
             f"peak_r{2}",
@@ -2791,42 +3191,58 @@ def peak_t_onset_generating_code(num_regs, results_dir, fig_dir):
             (masks[0], masks[1]),
             (labels_pretty[0], labels_pretty[1]),
             labels=(
-                r"Distal peak $\Delta F / F_0$ [%]",
-                r"Proximal peak $\Delta F / F_0$ [%]",
+                r"Distal peaklitude $\Delta F / F_0$ [%]",
+                r"Proximal peaklitude $\Delta F / F_0$ [%]",
             ),
+            binsize=15,
             percent=True,
-            title=f"p-value = {p:.03g}, R^2 = {rsq_mix:.03g}",
             mixreg=mixreg,
-            xlim=xlim,
-            ylim=ylim,
+            xlim=(-50, 520),
+            ylim=(-110, 520),
         )
-        save_fig(fig_dir, f"peak_scatter_distal_proximal_light_seq_{group}")
+        save_fig(fig_dir, f"peak_scatter_hist_distal_proximal_sync_wave_{group}")
 
-    masks, labels, labels_pretty = get_peak_t_onset_masks(
-        df_stat, df_stat_3, num_regs, 3
-    )
-
-    plot_split_bar(
-        df_stat["exp_name"],
-        masks,
-        labels_pretty,
-        df_stat["ptz"] == False,
-        CTRL_PTZ_COLORS,
-        test_sig=True,
-    )
-    save_fig(fig_dir, "category_bar")
-
-    set_fig_size(0.48, 0.7)
-    ylims = [(-40, 100), (-20, 250)]
-    for ptz, ylim in zip([False, True], ylims):
+    print("\npeak5s\n")
+    for ptz in [False, True]:
         group = "ptz" if ptz else "Control"
-        group_mask_stat = df_stat["ptz"] == ptz
-        for mask, label in zip(masks, labels):
-            group_label = group + "_" + label
-            c_mask = mask & group_mask_stat
+        print(f"\n{group}")
 
-            plot_trace(dff, c_mask, ylim=ylim, t_max=60)
-            save_fig(fig_dir, f"trace_{group_label}")
+        light_seq_mask = np.logical_and(
+            np.logical_or(masks[0], masks[1]), df_stat_3["ptz"] == ptz
+        )
+        df_stat_light_seq = df_stat_3[light_seq_mask]
+        x = df_stat_light_seq[f"peak5s_r{distal_reg}"].to_numpy()
+        y = df_stat_light_seq[f"peak5s_r{2}"].to_numpy()
+        a = (df_stat_light_seq["t_onset_cat"] == "calcium_wave").to_numpy()
+
+        mixreg, _, y_mix = linear_mixed_model(x, a, y)
+        p = likelihood_ratio_test(x, a, y)
+        print(f"likelihood-ratio-test: {p}")
+
+        rs_distal = ranksums(x[a], x[np.logical_not(a)])
+        rs_proximal = ranksums(y[a], y[np.logical_not(a)])
+
+        print(f"rank-sum distal peak: {rs_distal.pvalue}")
+        print(f"rank-sum proximal peak: {rs_proximal.pvalue}")
+
+        plot_scatter_hist_categories(
+            df_stat_light_seq,
+            f"peak5s_r{distal_reg}",
+            f"peak5s_r{2}",
+            (T_ONSET_CAT_COLORS[0], T_ONSET_CAT_COLORS[1]),
+            (masks[0], masks[1]),
+            (labels_pretty[0], labels_pretty[1]),
+            labels=(
+                r"Distal peaklitude $\Delta F / F_0$ [%]",
+                r"Proximal peaklitude $\Delta F / F_0$ [%]",
+            ),
+            binsize=15,
+            percent=True,
+            mixreg=mixreg,
+            xlim=(-50, 520),
+            ylim=(-110, 520),
+        )
+        save_fig(fig_dir, f"peak5s_scatter_hist_distal_proximal_sync_wave_{group}")
 
 
 def clustering_generating_code(num_regs, results_dir, fig_dir):
@@ -2884,28 +3300,38 @@ def clustering_generating_code(num_regs, results_dir, fig_dir):
             save_fig(fig_dir, f"trace_lines_{label}_cluster_{c_num}")
 
 
-def plot_amp4s_amp14s(
+def plot_bl_amp5s_amp15s(
     x,
-    amp4s=None,
-    amp14s=None,
-    amp4s_color=None,
-    amp14s_color=None,
-    amp4s_single=None,
-    amp14s_single=None,
+    bl=None,
+    amp5s=None,
+    amp15s=None,
+    bl_color=None,
+    amp5s_color=None,
+    amp15s_color=None,
+    bl_single=None,
+    amp5s_single=None,
+    amp15s_single=None,
 ):
     fig, ax = plt.subplots()
 
-    if amp4s is not None:
-        ax.plot(x, amp4s, color=amp4s_color, label=r"$\Delta F / F$ 4 sec")
-    if amp14s is not None:
-        ax.plot(x, amp14s, color=amp14s_color, label=r"$\Delta F / F$ 14 sec")
+    if amp5s is not None:
+        ax.plot(x, amp5s, color=amp5s_color, label=r"$\Delta F / F$ 5 sec")
+    if amp15s is not None:
+        ax.plot(x, amp15s, color=amp15s_color, label=r"$\Delta F / F$ 15 sec")
+    if bl is not None:
+        ax.plot(x, bl, color=bl_color, label=r"$\Delta F / F$ baseline")
 
-    if amp4s_single is not None:
-        for amp4s_s in amp4s_single:
-            ax.plot(x, amp4s_s, color=amp4s_color, alpha=0.3)
-    if amp14s_single is not None:
-        for amp14s_s in amp14s_single:
-            ax.plot(x, amp14s_s, color=amp14s_color, alpha=0.3)
+    if amp5s_single is not None:
+        for amp5s_s in amp5s_single:
+            ax.plot(x, amp5s_s, color=amp5s_color, alpha=0.3)
+
+    if amp15s_single is not None:
+        for amp15s_s in amp15s_single:
+            ax.plot(x, amp15s_s, color=amp15s_color, alpha=0.3)
+
+    if bl_single is not None:
+        for bl_s in bl_single:
+            ax.plot(x, bl_s, color=bl_color, alpha=0.3)
 
     ax.legend()
 
@@ -2927,14 +3353,24 @@ def calc_lag_corr_lim(x, x_ref, fs):
     return lags, corr, sig_lim
 
 
-def plot_autocorr_amp4s_amp14s(
-    x, amp4s, amp14s, amp4s_color, amp14s_color, amp4s_single=None, amp14s_single=None
+def plot_autocorr_amp5s_amp15s(
+    x,
+    bl,
+    amp5s,
+    amp15s,
+    bl_color,
+    amp5s_color,
+    amp15s_color,
+    bl_single=None,
+    amp5s_single=None,
+    amp15s_single=None,
 ):
     fig, ax = plt.subplots()
 
     space_sr = 1 / (x[1] - x[0])
-    lags, a_amp4s, sig_lim = calc_lag_corr_lim(amp4s, amp4s, space_sr)
-    _, a_amp14s, _ = calc_lag_corr_lim(amp14s, amp14s, space_sr)
+    lags, a_amp5s, sig_lim = calc_lag_corr_lim(amp5s, amp5s, space_sr)
+    _, a_amp15s, _ = calc_lag_corr_lim(amp15s, amp15s, space_sr)
+    _, a_bl, _ = calc_lag_corr_lim(bl, bl, space_sr)
 
     pos_mask = lags > 0
 
@@ -2944,37 +3380,53 @@ def plot_autocorr_amp4s_amp14s(
     ax.axhline(sig_lim, linestyle="dashed", color="gray", alpha=alpha_sig)
     ax.axhline(-sig_lim, linestyle="dashed", color="gray", alpha=alpha_sig)
 
-    if amp4s_single is not None:
-        for amp4s_s in amp4s_single:
-            _, a_amp4s_s, _ = calc_lag_corr_lim(amp4s_s, amp4s_s, space_sr)
+    if bl_single is not None:
+        for bl_s in bl_single:
+            _, a_bl_s, _ = calc_lag_corr_lim(bl_s, bl_s, space_sr)
             ax.plot(
                 lags[pos_mask],
-                a_amp4s_s[pos_mask],
-                color=amp4s_color,
+                a_bl_s[pos_mask],
+                color=bl_color,
                 alpha=alpha_single,
             )
 
-    if amp14s_single is not None:
-        for amp14s_s in amp14s_single:
-            _, a_amp14s_s, _ = calc_lag_corr_lim(amp14s_s, amp14s_s, space_sr)
+    if amp5s_single is not None:
+        for amp5s_s in amp5s_single:
+            _, a_amp5s_s, _ = calc_lag_corr_lim(amp5s_s, amp5s_s, space_sr)
             ax.plot(
                 lags[pos_mask],
-                a_amp14s_s[pos_mask],
-                color=amp14s_color,
+                a_amp5s_s[pos_mask],
+                color=amp5s_color,
+                alpha=alpha_single,
+            )
+
+    if amp15s_single is not None:
+        for amp15s_s in amp15s_single:
+            _, a_amp15s_s, _ = calc_lag_corr_lim(amp15s_s, amp15s_s, space_sr)
+            ax.plot(
+                lags[pos_mask],
+                a_amp15s_s[pos_mask],
+                color=amp15s_color,
                 alpha=alpha_single,
             )
 
     ax.plot(
         lags[pos_mask],
-        a_amp4s[pos_mask],
-        color=amp4s_color,
-        label=r"$\Delta F / F$ 4 sec",
+        a_bl[pos_mask],
+        color=bl_color,
+        label=r"$\Delta F / F$ baseline",
     )
     ax.plot(
         lags[pos_mask],
-        a_amp14s[pos_mask],
-        color=amp14s_color,
-        label=r"$\Delta F / F$ 14 sec",
+        a_amp5s[pos_mask],
+        color=amp5s_color,
+        label=r"$\Delta F / F$ 5 sec",
+    )
+    ax.plot(
+        lags[pos_mask],
+        a_amp15s[pos_mask],
+        color=amp15s_color,
+        label=r"$\Delta F / F$ 15 sec",
     )
 
     ax.set_ylabel("Correlation")
@@ -2982,39 +3434,31 @@ def plot_autocorr_amp4s_amp14s(
     ax.legend()
 
 
-def calc_t_amp_amp4s(dff, mask):
-    av_dff = np.mean(dff[mask], axis=0)
-    dff_peak = av_dff[
-        int(PRE_EVENT_T * VOLUME_RATE) : int(
-            (PRE_EVENT_T + POST_EVENT_T_PEAK) * VOLUME_RATE
-        )
-    ]
-    t_peak = np.argmax(dff_peak, axis=0) / VOLUME_RATE
-    amp = np.amax(dff_peak, axis=0) * 100
-    amp4s = dff_peak[int(4 * VOLUME_RATE)] * 100
+def calc_bl_amp5s_amp15s(bl_singles, amp5s_singles, amp15s_singles):
+    bl = np.mean(np.array(bl_singles), axis=0)
+    amp5s = np.mean(np.array(amp5s_singles), axis=0)
+    amp15s = np.mean(np.array(amp15s_singles), axis=0)
 
-    return t_peak, amp, amp4s
+    return bl, amp5s, amp15s
 
 
 def calc_reliability(xs, ys=None):
-    num_trials = len(xs)
+    x = copy.deepcopy(xs)
+    num_trials = len(x)
     rs = []
     if ys is not None:
-        for ind1 in range(num_trials):
-            x1 = xs[ind1]
-            for ind2 in range(num_trials):
-                """if ind1 == ind2:
-                continue"""
-
-                x2 = ys[ind2]
-                r, _ = stats.pearsonr(x1, x2)
-                rs.append(r)
+        y = copy.deepcopy(ys)
+        for ind in range(num_trials):
+            x1 = x[ind]
+            x2 = y[ind]
+            r, _ = stats.pearsonr(x1, x2)
+            rs.append(r)
 
     else:
         for ind1 in range(num_trials):
-            x1 = xs[ind1]
+            x1 = x[ind1]
             for ind2 in range(ind1):
-                x2 = xs[ind2]
+                x2 = x[ind2]
 
                 r, _ = stats.pearsonr(x1, x2)
                 rs.append(r)
@@ -3027,14 +3471,19 @@ def rep_ex_micro_generating_code(num_regs, results_dir, fig_dir):
     proximal_reg = num_regs - 1
     fig_dir = os.path.join(fig_dir, "micro")
 
-    amp4s_color = "green"
-    amp14s_color = "blue"
+    amp5s_color = "green"
+    amp15s_color = "blue"
+    bl_color = "gray"
 
     amp_lw = 0.5
 
     dff = load_np(results_dir, DFF_REGS_FNAME, num_regs)
     df_stat = load_pickle(results_dir, STATS_FNAME, num_regs)
+    df_stat6 = load_pickle(results_dir, STATS_FNAME, 6)
+
     pos_regs = load_np(results_dir, POS_REGS_FNAME, num_regs)
+
+    print(f"dff.shape: {dff.shape}")
 
     x = np.linspace(0, CELL_LENGTH, dff.shape[2])
 
@@ -3043,6 +3492,9 @@ def rep_ex_micro_generating_code(num_regs, results_dir, fig_dir):
     print(df_shuffled["exp_name"].size)
     for ind, row in df_shuffled.iterrows():
         exp_name = row["exp_name"]
+        # if exp_name != "20220412_12_32_27_GFAP_GCamp6s_F2_PTZ":
+        # continue
+
         roi_number = row["roi_number"]
         event_number = row["evt_num"]
         print(f"exp_name: {exp_name}\nroi_number: {roi_number}\n\n")
@@ -3052,14 +3504,13 @@ def rep_ex_micro_generating_code(num_regs, results_dir, fig_dir):
         )
         trial_mask = cell_mask & (df_stat["evt_num"] == event_number)
 
-        t_peak = np.array([row[f"t_peak_r{reg_num}"] for reg_num in range(num_regs)])
-        amp = np.array([row[f"amp_r{reg_num}"] for reg_num in range(num_regs)]) * 100
-        amp4s = (
-            np.array([row[f"amp4s_r{reg_num}"] for reg_num in range(num_regs)]) * 100
+        amp5s = (
+            np.array([row[f"amp5s_r{reg_num}"] for reg_num in range(num_regs)]) * 100
         )
-        amp14s = (
-            np.array([row[f"amp14s_r{reg_num}"] for reg_num in range(num_regs)]) * 100
+        amp15s = (
+            np.array([row[f"amp15s_r{reg_num}"] for reg_num in range(num_regs)]) * 100
         )
+        bl = np.array([row[f"bl_r{reg_num}"] for reg_num in range(num_regs)]) * 100
 
         pos_reg = pos_regs[ind]
         for pixel_num in range(pos_reg.shape[-1]):
@@ -3072,71 +3523,137 @@ def rep_ex_micro_generating_code(num_regs, results_dir, fig_dir):
         save_fig(fig_dir, f"ex_roi")
 
         set_fig_size(0.48, 1)
-        _, ax = plot_heatmap(dff, trial_mask, t_max=60, light_lw=amp_lw)
-        plot_amp_times(ax, x, amp4s_color, amp14s_color, lw=amp_lw)
+        _, ax = plot_heatmap(
+            dff, trial_mask, t_max=60, light_lw=amp_lw, include_baseline=True, bl=bl
+        )
+        plot_amp_times(ax, x, amp5s_color, amp15s_color, lw=amp_lw)
+        add_scale_bar(
+            ax, 0.5, 10, f"10 \u03bcm", loc="lower right", borderpad=1, color="darkgray"
+        )
+        save_fig(fig_dir, f"ex_heatmap_w_bl")
+
+        _, ax = plot_heatmap(
+            dff, trial_mask, t_max=60, light_lw=amp_lw, include_baseline=False, bl=bl
+        )
+        plot_amp_times(ax, x, amp5s_color, amp15s_color, lw=amp_lw)
         add_scale_bar(
             ax, 0.5, 10, f"10 \u03bcm", loc="lower right", borderpad=1, color="darkgray"
         )
         save_fig(fig_dir, f"ex_heatmap")
 
-        plot_amp4s_amp14s(x, amp4s, amp14s, amp4s_color, amp14s_color)
+        plot_bl_amp5s_amp15s(
+            x,
+            bl=bl,
+            amp5s=amp5s,
+            amp15s=amp15s,
+            bl_color=bl_color,
+            amp5s_color=amp5s_color,
+            amp15s_color=amp15s_color,
+        )
         save_fig(fig_dir, f"ex_amps")
 
-        plot_autocorr_amp4s_amp14s(x, amp4s, amp14s, amp4s_color, amp14s_color)
+        plot_autocorr_amp5s_amp15s(
+            x, bl, amp5s, amp15s, bl_color, amp5s_color, amp15s_color
+        )
         save_fig(fig_dir, f"ex_autocorr_amps")
 
-        t_peak, amp, amp4s = calc_t_amp_amp4s(dff, cell_mask)
-
-        amp4s_singles = []
-        amp14s_singles = []
+        bl_singles = []
+        amp5s_singles = []
+        amp15s_singles = []
         rows = df_stat[cell_mask]
+        rows_6 = df_stat6[cell_mask]
+        masks, _, labels_pretty = get_t_onset_masks(rows_6, 6)
+
         for _, row in rows.iterrows():
-            amp4s_singles.append(
-                np.array([row[f"amp4s_r{reg_num}"] for reg_num in range(num_regs)])
+            bl_singles.append(
+                np.array([row[f"bl_r{reg_num}"] for reg_num in range(num_regs)]) * 100
+            )
+            amp5s_singles.append(
+                np.array([row[f"amp5s_r{reg_num}"] for reg_num in range(num_regs)])
                 * 100
             )
-            amp14s_singles.append(
-                np.array([row[f"amp14s_r{reg_num}"] for reg_num in range(num_regs)])
+            amp15s_singles.append(
+                np.array([row[f"amp15s_r{reg_num}"] for reg_num in range(num_regs)])
                 * 100
             )
 
-        _, ax = plot_heatmap(dff, trial_mask, t_max=60, light_lw=amp_lw)
-        plot_amp_times(ax, x, amp4s_color, amp14s_color, lw=amp_lw)
+        bl, amp5s, amp15s = calc_bl_amp5s_amp15s(
+            bl_singles, amp5s_singles, amp15s_singles
+        )
+
+        _, ax = plot_heatmap(
+            dff, trial_mask, t_max=60, light_lw=amp_lw, include_baseline=True, bl=bl
+        )
+        plot_amp_times(ax, x, amp5s_color, amp15s_color, lw=amp_lw)
+        add_scale_bar(
+            ax, 0.5, 10, f"10 \u03bcm", loc="lower right", borderpad=1, color="darkgray"
+        )
+        save_fig(fig_dir, f"ex_heatmap_multi_w_bl")
+
+        _, ax = plot_heatmap(
+            dff, trial_mask, t_max=60, light_lw=amp_lw, include_baseline=False, bl=bl
+        )
+        plot_amp_times(ax, x, amp5s_color, amp15s_color, lw=amp_lw)
         add_scale_bar(
             ax, 0.5, 10, f"10 \u03bcm", loc="lower right", borderpad=1, color="darkgray"
         )
         save_fig(fig_dir, f"ex_heatmap_multi")
 
-        reliability = calc_reliability(amp4s_singles)
-        plot_amp4s_amp14s(
+        reliability = calc_reliability(bl_singles)
+        plot_bl_amp5s_amp15s(
             x,
-            amp4s=amp4s,
-            amp4s_color=amp4s_color,
-            amp4s_single=amp4s_singles,
+            bl=bl,
+            bl_color=bl_color,
+            bl_single=bl_singles,
         )
-        print(f"reliability amp4s: {reliability}")
-        save_fig(fig_dir, f"ex_amp4s_multi")
+        print(f"reliability bl: {reliability}")
+        save_fig(fig_dir, f"ex_bl_multi")
 
-        reliability = calc_reliability(amp14s_singles)
-        plot_amp4s_amp14s(
+        reliability = calc_reliability(amp5s_singles)
+        plot_bl_amp5s_amp15s(
             x,
-            amp14s=amp14s,
-            amp14s_color=amp14s_color,
-            amp14s_single=amp14s_singles,
+            amp5s=amp5s,
+            amp5s_color=amp5s_color,
+            amp5s_single=amp5s_singles,
         )
-        print(f"reliability amp14s: {reliability}")
-        save_fig(fig_dir, f"ex_amp14s_multi")
+        print(f"reliability amp5s: {reliability}")
+        save_fig(fig_dir, f"ex_amp5s_multi")
 
-        plot_autocorr_amp4s_amp14s(
+        reliability = calc_reliability(amp15s_singles)
+        plot_bl_amp5s_amp15s(
             x,
-            amp4s,
-            amp14s,
-            amp4s_color,
-            amp14s_color,
-            amp4s_single=amp4s_singles,
-            amp14s_single=amp14s_singles,
+            amp15s=amp15s,
+            amp15s_color=amp15s_color,
+            amp15s_single=amp15s_singles,
+        )
+        print(f"reliability amp15s: {reliability}")
+        save_fig(fig_dir, f"ex_amp15s_multi")
+
+        plot_autocorr_amp5s_amp15s(
+            x,
+            bl,
+            amp5s,
+            amp15s,
+            bl_color,
+            amp5s_color,
+            amp15s_color,
+            bl_single=bl_singles,
+            amp5s_single=amp5s_singles,
+            amp15s_single=amp15s_singles,
         )
         save_fig(fig_dir, f"ex_autocorr_amps_multi")
+
+        bl_np = np.array(bl_singles)
+        fig, ax = plt.subplots()
+        for mask, label, color in zip(masks, labels_pretty, T_ONSET_CAT_COLORS):
+            if np.sum(mask):
+                av_bl = np.mean(bl_np[mask], axis=0)
+                ax.plot(x, av_bl, label=label, color=color)
+
+        ax.legend()
+
+        ax.set_xlabel("Distal <-> Proximal [micrometer]")
+        ax.set_ylabel(r"$\Delta F / F_0$ [%]")
 
         plt.show()
 
@@ -3146,14 +3663,11 @@ def micro_generating_code(num_regs, results_dir, fig_dir):
     proximal_reg = num_regs - 1
     fig_dir = os.path.join(fig_dir, "micro")
 
-    amp4s_color = "green"
-    amp_color = "blue"
-
     df_stat = load_pickle(results_dir, STATS_FNAME, num_regs)
     ptz = []
-    amp4s_reliabilities = []
-    amp14s_reliabilities = []
-    cross_reliabilities = []
+    bl_reliabilities = []
+    amp5s_reliabilities = []
+    amp15s_reliabilities = []
 
     exp_name_set = df_stat["exp_name"].unique()
     roi_num_set = df_stat["roi_number"].unique()
@@ -3168,31 +3682,36 @@ def micro_generating_code(num_regs, results_dir, fig_dir):
                 continue
 
             df_cell = df_stat[cell_mask]
-            amp4s_singles = []
-            amp14s_singles = []
+            bl_singles = []
+            amp5s_singles = []
+            amp15s_singles = []
             for _, trial in df_cell.iterrows():
-                amp4s_singles.append(
+                bl_singles.append(
+                    np.array([trial[f"bl_r{reg_num}"] for reg_num in range(num_regs)])
+                    * 100
+                )
+                amp5s_singles.append(
                     np.array(
-                        [trial[f"amp4s_r{reg_num}"] for reg_num in range(num_regs)]
+                        [trial[f"amp5s_r{reg_num}"] for reg_num in range(num_regs)]
                     )
                     * 100
                 )
-                amp14s_singles.append(
+                amp15s_singles.append(
                     np.array(
-                        [trial[f"amp14s_r{reg_num}"] for reg_num in range(num_regs)]
+                        [trial[f"amp15s_r{reg_num}"] for reg_num in range(num_regs)]
                     )
                     * 100
                 )
 
-            amp4s_reliabilities.append(calc_reliability(amp4s_singles))
-            amp14s_reliabilities.append(calc_reliability(amp14s_singles))
-            cross_reliabilities.append(calc_reliability(amp4s_singles, amp14s_singles))
+            bl_reliabilities.append(calc_reliability(bl_singles))
+            amp5s_reliabilities.append(calc_reliability(amp5s_singles))
+            amp15s_reliabilities.append(calc_reliability(amp15s_singles))
             ptz.append(df_cell["ptz"].unique()[0])
 
     ptz = np.array(ptz)
-    amp4s_reliabilities = np.array(amp4s_reliabilities)
-    amp14s_reliabilities = np.array(amp14s_reliabilities)
-    cross_reliabilities = np.array(cross_reliabilities)
+    bl_reliabilities = np.array(bl_reliabilities)
+    amp5s_reliabilities = np.array(amp5s_reliabilities)
+    amp15s_reliabilities = np.array(amp15s_reliabilities)
 
     for mask, group_label in zip(
         [df_stat["ptz"] == False, df_stat["ptz"] == True], ["control", "ptz"]
@@ -3203,8 +3722,8 @@ def micro_generating_code(num_regs, results_dir, fig_dir):
     set_fig_size(0.48, 1)
     plot_split_bar_ptz(
         ptz,
-        [amp4s_reliabilities, amp14s_reliabilities, cross_reliabilities],
-        ["4 sec", "14 sec", "4-14 sec"],
+        [bl_reliabilities, amp5s_reliabilities, amp15s_reliabilities],
+        ["baseline", "5 sec", "15 sec"],
         "Inter-Trial Correlation (mean)",
     )
     save_fig(fig_dir, "reliability_bar")
@@ -3215,15 +3734,15 @@ def ex_micro_generating_code(num_regs, results_dir, fig_dir):
     proximal_reg = num_regs - 1
     fig_dir = os.path.join(fig_dir, "micro")
 
-    df_stat_3 = load_pickle(results_dir, STATS_FNAME, 3)
     df_stat_6 = load_pickle(results_dir, STATS_FNAME, 6)
+    df_stat = load_pickle(results_dir, STATS_FNAME, num_regs)
     dff = load_np(results_dir, DFF_REGS_FNAME, num_regs)
-    dff_3 = load_np(results_dir, DFF_REGS_FNAME, 3)
+    dff_6 = load_np(results_dir, DFF_REGS_FNAME, 6)
 
-    masks, labels, labels_pretty = get_amp_t_onset_masks(df_stat_6, df_stat_3, 6, 3)
+    masks, labels, _ = get_t_onset_masks(df_stat_6, 6)
 
-    cell_mask = (df_stat_3["ptz"] == True) & (df_stat_3["roi_number"] == 5)
-    cell_mask = (df_stat_3["ptz"] == False) | (df_stat_3["ptz"] == True)
+    cell_mask = (df_stat_6["ptz"] == True) & (df_stat_6["roi_number"] == 5)
+    cell_mask = (df_stat_6["ptz"] == False) | (df_stat_6["ptz"] == True)
 
     rng = np.random.default_rng()
 
@@ -3238,12 +3757,18 @@ def ex_micro_generating_code(num_regs, results_dir, fig_dir):
             if c_mask[ind]:
                 mask_ex[ind] = True
 
-                plot_trace(dff_3, mask_ex, t_max=60)
+                row = df_stat[mask_ex]
+                bl = np.squeeze(
+                    np.array([row[f"bl_r{reg_num}"] for reg_num in range(num_regs)])
+                    * 100
+                )
+
+                plot_trace(dff_6, mask_ex, t_max=60)
                 save_fig(fig_dir, f"ex_trace_{label}")
                 plot_heatmap(dff, mask_ex, t_max=60)
                 save_fig(fig_dir, f"ex_heatmap_{label}")
-                """ plot_heatmap(dff, mask_ex, t_max=60, norm=True)
-                save_fig(fig_dir, f"ex_heatmap_norm_{label}") """
+                plot_heatmap(dff, mask_ex, t_max=60, include_baseline=True, bl=bl)
+                save_fig(fig_dir, f"ex_heatmap_w_bl_{label}")
                 plt.show()
 
                 mask_ex[ind] = False
@@ -3251,6 +3776,89 @@ def ex_micro_generating_code(num_regs, results_dir, fig_dir):
                 cont = input("continue? (y/n)")
                 if cont == "n":
                     break
+
+
+def freq_analysis_generating_code(num_regs, results_dir, fig_dir):
+    fig_dir = os.path.join(fig_dir, "freq")
+
+    d2f = load_np(results_dir, SECOND_DERIVATIVE_FNAME, num_regs)
+
+    print(f"d2f.shape: {d2f.shape}")
+
+    fft = np.fft.fft(d2f, axis=1)
+    n = fft.shape[1]
+    freqs = np.fft.fftfreq(n, 1 / VOLUME_RATE)
+
+    fft = fft[:, : n // 2]
+    freqs = freqs[: n // 2]
+    reg_colors = get_region_colors(num_regs)
+
+    set_fig_size(0.48, 0.7)
+
+    plt.figure()
+    for reg_num, reg_col in zip(range(num_regs), reg_colors):
+        if reg_num == 0:
+            plt.plot(
+                freqs,
+                10 * np.log10(np.absolute(np.mean(fft[:, :, reg_num], axis=0))),
+                color=reg_col,
+                alpha=MARKER_ALPHA,
+                label="Distal",
+            )
+        elif reg_num == num_regs - 1:
+            plt.plot(
+                freqs,
+                10 * np.log10(np.absolute(np.mean(fft[:, :, reg_num], axis=0))),
+                color=reg_col,
+                alpha=MARKER_ALPHA,
+                label="Proximal",
+            )
+        else:
+            plt.plot(
+                freqs,
+                10 * np.log10(np.absolute(np.mean(fft[:, :, reg_num], axis=0))),
+                color=reg_col,
+                alpha=MARKER_ALPHA,
+            )
+
+    plt.legend()
+    plt.xlabel("Frequency [Hz]")
+    plt.ylabel("10 log(mean(FFT))")
+
+    save_fig(fig_dir, "mean_raw_second_derivative")
+
+    plt.figure()
+    for reg_num, reg_col in zip(range(num_regs), reg_colors):
+
+        if reg_num == 0:
+            plt.plot(
+                freqs,
+                10 * np.log10(np.absolute(np.std(fft[:, :, reg_num], axis=0))),
+                color=reg_col,
+                alpha=MARKER_ALPHA,
+                label="Distal",
+            )
+        elif reg_num == num_regs - 1:
+            plt.plot(
+                freqs,
+                10 * np.log10(np.absolute(np.std(fft[:, :, reg_num], axis=0))),
+                color=reg_col,
+                alpha=MARKER_ALPHA,
+                label="Proximal",
+            )
+        else:
+            plt.plot(
+                freqs,
+                10 * np.log10(np.absolute(np.std(fft[:, :, reg_num], axis=0))),
+                color=reg_col,
+                alpha=MARKER_ALPHA,
+            )
+
+    plt.legend()
+    plt.xlabel("Frequency [Hz]")
+    plt.ylabel("10 log(std(FFT))")
+
+    save_fig(fig_dir, "std_raw_second_derivative")
 
 
 def plot_amp_pos(dff):
@@ -3274,13 +3882,17 @@ def main():
     num_reg = 6
     # schematic_calcium_event_detection(num_reg, results_dir, fig_dir)
     # schematic_calcium_wave_detection(num_reg, results_dir, fig_dir)
-    # t_onset_regions_generating_code(num_reg, results_dir, fig_dir)
-    amp_t_onset_generating_code(num_reg, results_dir, fig_dir)
+    t_onset_regions_generating_code(num_reg, results_dir, fig_dir)
+    # amp_t_onset_generating_code(num_reg, results_dir, fig_dir)
+    # peak_t_onset_generating_code(num_reg, results_dir, fig_dir)
     # clustering_generating_code(num_reg, results_dir, fig_dir)
+    # bl_t_onset_generating_code(num_reg, results_dir, fig_dir)
+    # freq_analysis_generating_code(num_reg, results_dir, fig_dir)
 
     num_reg = 110
-    # rep_ex_micro_generating_code(num_reg, results_dir, fig_dir)
     # micro_generating_code(num_reg, results_dir, fig_dir)
+    # rep_ex_micro_generating_code(num_reg, results_dir, fig_dir)
+    # ex_micro_generating_code(num_reg, results_dir, fig_dir)
 
     plt.show()
 

@@ -50,6 +50,31 @@ def calc_pos_pca0(c_pos, cfg, micron_per_meter):
     return pos_pca0
 
 
+def calc_pc1(c_pos, cfg, micron_per_meter):
+    pca = PCA(n_components=2).fit(c_pos.T)
+    center = np.mean(c_pos, axis=1)
+    comp0 = pca.components_[0]
+    comp0y = comp0[0]
+    comp0x = comp0[1]
+    if center[0] - cfg.Ly / 2 > 0:
+        """
+        center below midline
+        """
+        if comp0y > 0:
+            comp0[0] = -np.absolute(comp0y)
+            comp0[1] = -comp0x
+
+    else:
+        """
+        cell above midline
+        """
+        if comp0y < 0:
+            comp0[0] = np.absolute(comp0y)
+            comp0[1] = -comp0x
+
+    return comp0
+
+
 def get_reg_mask(pos_pca0, n_regions):
     """
     Divide into regions by position along proximal-distal axis, equal length of regions

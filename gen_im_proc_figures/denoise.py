@@ -1,30 +1,21 @@
 import numpy as np
 import tifffile
-from tqdm import tqdm
-import skimage as ski
-from rastermap import Rastermap
 from matplotlib import pyplot as plt
 from matplotlib import cm as cm
 import os
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+from scipy import signal
 
 
-EXP_DIR = (
-    "Y:\\Vegard\\data\\20220604_13_23_11_HuC_GCamp6s_GFAP_jRGECO_F1_C\\OpticTectum"
-)
+EXP_DIR = "Y:\\Vegard\\data\\20220412_12_32_27_GFAP_GCamp6s_F2_PTZ\\OpticTectum"
 
-ALIGNED_GLIA_FNAME = "aligned_chan2.tif"
-DENOISED_GLIA_FNAME = "denoised_chan2.tif"
+ALIGNED_GLIA_FNAME = "aligned.tif"
+DENOISED_GLIA_FNAME = "denoised.tif"
 
 VOLUME_RATE = 4.86
+MICRON_PER_PIXEL = 0.455729
 
-THRESHOLD_ABS = 700
-BIN_SIZE = 1  # size of square for spatial bin
-EDGE_ARTIFACT = 0  # number of edge artifact frames after lowpass filter
-
-SHOW_THRESH_IMPACT = False
-SAVE_FILT = False
-
-CLIM = (300, 1500)
+CLIM = (500, 3000)
 
 LIGHTBLUE = (101 / 255, 221 / 255, 247 / 255)
 ORANGE = (247 / 255, 151 / 255, 54 / 255)
@@ -73,11 +64,27 @@ def calc_snr(data):
 
 
 def plot_frame(im):
-    plt.figure()
-    plt.imshow(im, cmap="gray", origin="lower")
-    plt.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    fig, ax = plt.subplots()
+    axim = ax.imshow(im, cmap="gray", origin="lower")
+    ax.axis("off")
+    axim.set_clim(CLIM[0], CLIM[1])
+
+    bar_size = 10
+    loc = "lower right"
+    asb = AnchoredSizeBar(
+        ax.transData,
+        size=bar_size / MICRON_PER_PIXEL,
+        size_vertical=1,
+        label=f"{str(bar_size)} \u03bcm",
+        loc=loc,
+        pad=0.1,
+        borderpad=2,
+        frameon=False,
+        color="white",
+    )
+    ax.add_artist(asb)
+
     plt.tight_layout()
-    plt.clim(CLIM[0], CLIM[1])
 
 
 def calc_dist(x, num_bins=100):
@@ -117,12 +124,32 @@ def plot_traces(xs, colors, labels, fs, normalize=True):
             xs[i] = (x - np.mean(x)) / np.std(x)
 
     for x, color, label in zip(xs, colors, labels):
-        ax.plot(t, x, color=color, label=label, alpha=0.8)
+        ax.plot(t, x, color=color, label=label, alpha=0.6)
 
     ax.set_xlabel("Time [min]")
     if normalize:
         ax.set_ylabel("Fluorescence [a.u.]")
 
+    ax.legend()
+
+
+def plot_snr(xs, colors, labels, fs):
+
+    _, ax = plt.subplots()
+
+    for x, color, label in zip(xs, colors, labels):
+        mu = np.reshape(np.mean(x, axis=0), (-1))
+
+        sos = signal.butter(2, 0.5, btype="high", output="sos", fs=fs)
+        x_hp = signal.sosfiltfilt(sos, x, axis=0)
+        sigma = np.reshape(np.std(x_hp, axis=0), (-1))
+
+        snr = np.sort(mu / sigma)
+
+        ax.plot(snr, np.cumsum(snr) / np.sum(snr), label=label, color=color, alpha=0.8)
+
+    ax.set_xlabel("SNR")
+    ax.set_ylabel("CDF(SNR)")
     ax.legend()
 
 
@@ -145,27 +172,40 @@ def main():
 
         if label == "denoised":
             single_frames.append(img[frame_num - frames_dropped_denoise])
-            f_denoised = np.mean(img, axis=(1, 2))
+            f_denoised = img
         else:
             single_frames.append(img[frame_num])
-            f_aligned = np.mean(img[frames_dropped_denoise:], axis=(1, 2))
+            f_aligned = img[frames_dropped_denoise:]
 
     f_denoised, f_aligned = clip_longest(f_denoised, f_aligned)
+
+    f_av_aligned, f_av_denoised = np.mean(f_aligned, axis=(1, 2)), np.mean(
+        f_denoised, axis=(1, 2)
+    )
 
     set_fig_size(0.48, 1)
     for im, label in zip(single_frames, labels):
         plot_frame(im)
         save_fig(fig_dir, f"{label}_frame")
 
-    set_fig_size(0.6, 1)
+    set_fig_size(0.48, 1)
     plot_traces(
-        [f_aligned, f_denoised],
+        [f_av_aligned, f_av_denoised],
         [ORANGE, LIGHTBLUE],
         ["aligned", "denoised"],
         VOLUME_RATE,
         normalize=True,
     )
     save_fig(fig_dir, "traces_av_aligned_denoised")
+
+    set_fig_size(0.48, 1)
+    plot_snr(
+        [f_aligned, f_denoised],
+        [ORANGE, LIGHTBLUE],
+        ["aligned", "denoised"],
+        VOLUME_RATE,
+    )
+    save_fig(fig_dir, "snr_aligned_denoised")
     plt.show()
 
 

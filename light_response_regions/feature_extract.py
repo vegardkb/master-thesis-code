@@ -2,7 +2,7 @@ from tqdm import tqdm
 import numpy as np
 import copy
 from scipy import signal
-from scipy.stats import linregress, pearsonr
+from scipy.stats import linregress
 from sklearn.linear_model import LinearRegression
 import pandas as pd
 
@@ -56,8 +56,14 @@ ISIS = [300]
 MICROM_PER_M = 1000000
 CELL_LENGTH = 50
 
-FREQ_CUT_OFF = 0.25
+""" FREQ_CUT_OFF = 0.25
+FILTER_ORDER = 8 """
+
+LOW_PASS_FILTER = True
+FREQ_CUT_OFF = 0.375
 FILTER_ORDER = 8
+
+MERGE_PEAKS = True
 
 N_REGIONS_LIST = [3, 6]
 
@@ -105,22 +111,18 @@ def create_column_names(num_regions):
         "isi",
         "ptz",
         "evt_num",
-        "amp_slope",
-        "t_peak_slope",
-        "t_peak_pearsonr",
         "t_onset_slope",
-        "t_onset_pearsonr",
-        "t_lag_dff_slope",
-        "t_lag_res_slope",
-        "prop_dist",
-        "prop_origin",
+        "t_onset_rsq",
     ]
     for reg_num in range(num_regions):
         cols = cols + [
             "peak" + f"_r{reg_num}",
+            "peak5s" + f"_r{reg_num}",
+            "peak15s" + f"_r{reg_num}",
             "bl" + f"_r{reg_num}",
             "amp" + f"_r{reg_num}",
-            "amp25s" + f"_r{reg_num}",
+            "amp5s" + f"_r{reg_num}",
+            "amp15s" + f"_r{reg_num}",
             "t_peak" + f"_r{reg_num}",
             "t_decay" + f"_r{reg_num}",
             "t_constant_decay" + f"_r{reg_num}",
@@ -130,13 +132,8 @@ def create_column_names(num_regions):
             "t_lag_res" + f"_r{reg_num}",
             "corr_res" + f"_r{reg_num}",
             "limit_res" + f"_r{reg_num}",
-            "acc_onset" + f"_r{reg_num}",
-            "acc_middle" + f"_r{reg_num}",
-            "acc_offset" + f"_r{reg_num}",
             "t_onset" + f"_r{reg_num}",
             "diff_dxdt" + f"_r{reg_num}",
-            "t_peak_d2xdt2" + f"_r{reg_num}",
-            "peak_d2xdt2" + f"_r{reg_num}",
         ]
     return cols
 
@@ -160,12 +157,9 @@ def create_empty_t_onsets_dict():
         "time_com": [],
         "time_start": [],
         "time_end": [],
-        "time_peak": [],
-        "dxdt_end": [],
         "diff_dxdt": [],
         "pre_dff": [],
         "pre_bl_sub_dff": [],
-        "peak": [],
         "region": [],
     }
     return t_onsets_dict
@@ -179,6 +173,12 @@ def second_derivative(x, dt):
     return (-x[1:-5] + 16 * x[2:-4] - 30 * x[3:-3] + 16 * x[4:-2] - x[5:-1]) / (
         12 * dt**2
     )
+
+
+def low_pass_filter(dff_raw, fs, f_c, order):
+    sos = signal.butter(order, f_c, btype="low", output="sos", fs=fs)
+    dff_reg = signal.sosfiltfilt(sos, dff_raw, axis=0)
+    return dff_reg
 
 
 def time_constant(x, dt):
@@ -195,7 +195,7 @@ def time_constant(x, dt):
     return time_const
 
 
-def calc_peak_bl_amp(dff_reg, reg_mean_pos, fs):
+def calc_peak_bl_amp(dff_reg, fs):
     dff_bl = dff_reg[: int(PRE_EVENT_T * fs)]
     dff_peak = dff_reg[
         int(PRE_EVENT_T * fs) : int((PRE_EVENT_T + POST_EVENT_T_PEAK) * fs)
@@ -203,26 +203,25 @@ def calc_peak_bl_amp(dff_reg, reg_mean_pos, fs):
 
     bl = np.mean(dff_bl, axis=0)
     peak = np.amax(dff_peak, axis=0)
-    dff25s = dff_reg[int((PRE_EVENT_T + 2.5) * fs)]
+    dff5s = dff_reg[int((PRE_EVENT_T + 5) * fs)]
+    dff15s = dff_reg[int((PRE_EVENT_T + 15) * fs)]
     neg = peak < bl
 
     if np.any(neg):
         peak[neg] = np.amin(dff_peak[:, neg], axis=0)
     amp = peak - bl
-    amp25s = dff25s - bl
+    amp5s = dff5s - bl
+    amp15s = dff15s - bl
 
     stats, names = [], []
     for reg_num in range(dff_reg.shape[1]):
         stats.append(bl[reg_num]), names.append(f"bl_r{reg_num}")
         stats.append(peak[reg_num]), names.append(f"peak_r{reg_num}")
+        stats.append(dff5s[reg_num]), names.append(f"peak5s_r{reg_num}")
+        stats.append(dff15s[reg_num]), names.append(f"peak15s_r{reg_num}")
         stats.append(amp[reg_num]), names.append(f"amp_r{reg_num}")
-        stats.append(amp25s[reg_num]), names.append(f"amp25s_r{reg_num}")
-
-    amp_slope = linregress(reg_mean_pos, amp).slope
-    prop_dist, prop_origin = propagation_dist(amp)
-    stats.append(amp_slope), names.append("amp_slope")
-    stats.append(prop_dist), names.append("prop_dist")
-    stats.append(prop_origin), names.append("prop_origin")
+        stats.append(amp5s[reg_num]), names.append(f"amp5s_r{reg_num}")
+        stats.append(amp15s[reg_num]), names.append(f"amp15s_r{reg_num}")
 
     return stats, names
 
@@ -249,7 +248,7 @@ def get_region_pos(roi, cfg, num_reg):
     return region_pos_z
 
 
-def calc_ts(dff_reg, reg_mean_pos, fs):
+def calc_ts(dff_reg, fs):
     num_regions = dff_reg.shape[1]
     t_stim = np.ones(num_regions) * PRE_EVENT_T
     ind_peak = np.argmax(
@@ -285,74 +284,7 @@ def calc_ts(dff_reg, reg_mean_pos, fs):
             f"t_constant_decay_r{reg_num}"
         )
 
-    t_peak_slope = linregress(reg_mean_pos, t_peak).slope
-    t_peak_pearsonr = np.absolute(pearsonr(reg_mean_pos, t_peak)[0])
-
-    stats.append(t_peak_slope), names.append("t_peak_slope")
-    stats.append(t_peak_pearsonr), names.append("t_peak_pearsonr")
-
     return stats, names
-
-
-def low_pass_filter(dff_raw, fs, f_c, order):
-    sos = signal.butter(order, f_c, btype="low", output="sos", fs=fs)
-    dff_reg = signal.sosfiltfilt(sos, dff_raw, axis=0)
-    return dff_reg
-
-
-def acceleration(d2xdt2, fs):
-    onset_phase = [int(PRE_EVENT_T * fs), int((PRE_EVENT_T + 5) * fs)]
-    middle_phase = [int((PRE_EVENT_T + 5) * fs), int((PRE_EVENT_T + 10) * fs)]
-    offset_phase = [int((PRE_EVENT_T + 10) * fs), int((PRE_EVENT_T + 15) * fs)]
-
-    acc_onset = np.mean(d2xdt2[onset_phase[0] : onset_phase[1]], axis=0)
-    acc_middle = np.mean(d2xdt2[middle_phase[0] : middle_phase[1]], axis=0)
-    acc_offset = np.mean(d2xdt2[offset_phase[0] : offset_phase[1]], axis=0)
-
-    stats, names = [], []
-    for reg_num in range(d2xdt2.shape[1]):
-        stats.append(acc_onset[reg_num]), names.append(f"acc_onset_r{reg_num}")
-        stats.append(acc_middle[reg_num]), names.append(f"acc_middle_r{reg_num}")
-        stats.append(acc_offset[reg_num]), names.append(f"acc_offset_r{reg_num}")
-
-    return stats, names
-
-
-def propagation_dist(amp_reg):
-    prop_dists = []
-    prop_origins = []
-    prop_dist = 0
-    prop_origin = 0
-    amp = amp_reg[0]
-    for reg_num in range(1, amp_reg.shape[0]):
-        if amp_reg[reg_num] > amp:
-            prop_dist += 1
-
-        else:
-            prop_dists.append(prop_dist)
-            prop_origins.append(prop_origin)
-            prop_dist = 0
-            prop_origin = reg_num
-
-        amp = amp_reg[reg_num]
-
-    prop_dists.append(prop_dist)
-    prop_origins.append(prop_origin)
-
-    max_dist = -np.inf
-    argmax = 0
-    ind = 0
-
-    while ind < len(prop_dists):
-        dist = prop_dists[ind]
-        if dist > max_dist:
-            max_dist = dist
-            argmax = ind
-            max_dist = dist
-
-        ind += 1
-
-    return prop_dists[argmax], prop_origins[argmax]
 
 
 def calc_lag_corr(x, x_ref, fs, max_lag=10):
@@ -373,7 +305,7 @@ def calc_lag_corr(x, x_ref, fs, max_lag=10):
     return lags[lag_ind], corr[lag_ind], 2.33 / np.sqrt(n)  # 1.96 - 5%, 2.33 - 1%
 
 
-def calc_t_lag(dff_reg, reg_mean_pos, fs):
+def calc_t_lag(dff_reg, fs):
     num_regions = dff_reg.shape[1]
 
     dff_distal_whole = dff_reg[:, DISTAL_REG]
@@ -412,25 +344,58 @@ def calc_t_lag(dff_reg, reg_mean_pos, fs):
         stats.append(t_lag_res[reg_num]), names.append(f"t_lag_res_r{reg_num}")
         stats.append(limit_res[reg_num]), names.append(f"limit_res_r{reg_num}")
 
-    t_lag_dff_slope = linregress(reg_mean_pos, t_lag_dff).slope
-    t_lag_res_slope = linregress(reg_mean_pos, t_lag_res).slope
-    stats.append(t_lag_dff_slope), names.append("t_lag_dff_slope")
-    stats.append(t_lag_res_slope), names.append("t_lag_res_slope")
-
     return stats, names
 
 
-def calc_t_onsets(d2xdt2, dff_reg, dxdt, reg_mean_pos, fs):
+def merge_peaks(peaks, d2xdt2_onset, merge):
+    midpoint_list = []
+    if len(peaks) > 1 and merge:
+        peaks_filt = peaks.tolist()
+        merge_list = []
+
+        for ind1, ind2 in zip(peaks[:-1], peaks[1:]):
+            x_between = d2xdt2_onset[ind1 : ind2 + 1]
+            midpoint = np.argmin(x_between)
+            midpoint_list.append(midpoint + ind1)
+
+            if np.any(x_between < 0):
+                merge_list.append(False)
+            else:
+                merge_list.append(True)
+
+        i = 0
+        while i < len(merge_list):
+            ind1 = peaks_filt[i]
+            ind2 = peaks_filt[i + 1]
+            merge = merge_list[i]
+
+            if merge:
+                merge_list.pop(i)
+                midpoint_list.pop(i)
+                peaks_filt.pop(i)
+
+                if d2xdt2_onset[ind1] >= d2xdt2_onset[ind2]:
+                    peaks_filt[i] = ind1
+                else:
+                    peaks_filt[i] = ind2
+
+                i = 0
+            else:
+                i += 1
+
+        peaks = np.array(peaks_filt)
+
+    return peaks, midpoint_list
+
+
+def calc_t_onsets(d2xdt2, dff_reg, reg_mean_pos, fs):
     t_onset_dict = {
         "time_com": [],
         "time_start": [],
         "time_end": [],
-        "time_peak": [],
-        "dxdt_end": [],
         "diff_dxdt": [],
         "pre_dff": [],
         "pre_bl_sub_dff": [],
-        "peak": [],
         "region": [],
     }
 
@@ -449,12 +414,6 @@ def calc_t_onsets(d2xdt2, dff_reg, dxdt, reg_mean_pos, fs):
             ),
             reg_num,
         ]
-        dxdt_onset = dxdt[
-            int(PRE_EVENT_T * fs / 2) : int(
-                (PRE_EVENT_T + STIM_DURATION + POST_STIM_T_EVENT) * fs
-            ),
-            reg_num,
-        ]
         dff_onset = dff_reg[
             int(PRE_EVENT_T * fs / 2) : int(
                 (PRE_EVENT_T + STIM_DURATION + POST_STIM_T_EVENT) * fs
@@ -464,54 +423,10 @@ def calc_t_onsets(d2xdt2, dff_reg, dxdt, reg_mean_pos, fs):
         bl = bl_reg[reg_num]
 
         peaks, _ = signal.find_peaks(d2xdt2_onset, height=0.0001)
-        midpoint_list = []
-        if len(peaks) > 1:
-            peaks_filt = peaks.tolist()
-            merge_list = []
-
-            for ind1, ind2 in zip(peaks[:-1], peaks[1:]):
-                x_between = d2xdt2_onset[ind1 : ind2 + 1]
-                midpoint = np.argmin(x_between)
-                midpoint_list.append(midpoint + ind1)
-
-                rel_diff_t = 0.01
-                rel_diff_l = (x_between[0] - x_between[midpoint]) / x_between[midpoint]
-                rel_diff_r = (x_between[-1] - x_between[midpoint]) / x_between[midpoint]
-
-                if np.any(x_between < 0):
-                    merge_list.append(False)
-                elif rel_diff_l > rel_diff_t and rel_diff_r > rel_diff_t:
-                    merge_list.append(False)
-                else:
-                    merge_list.append(True)
-
-            i = 0
-            while i < len(merge_list):
-                ind1 = peaks_filt[i]
-                ind2 = peaks_filt[i + 1]
-                merge = merge_list[i]
-
-                if merge:
-                    merge_list.pop(i)
-                    midpoint_list.pop(i)
-                    peaks_filt.pop(i)
-
-                    if d2xdt2_onset[ind1] >= d2xdt2_onset[ind2]:
-                        peaks_filt[i] = ind1
-                    else:
-                        peaks_filt[i] = ind2
-
-                    i = 0
-                else:
-                    i += 1
-
-            peaks = np.array(peaks_filt)
+        peaks, midpoint_list = merge_peaks(peaks, d2xdt2_onset, MERGE_PEAKS)
 
         t_com = np.nan
         diff_dxdt = -np.inf
-
-        max_t_peak = np.nan
-        max_peak = -np.inf
 
         for i, peak in enumerate(peaks):
             pre_mid = 0
@@ -536,9 +451,6 @@ def calc_t_onsets(d2xdt2, dff_reg, dxdt, reg_mean_pos, fs):
             t_int = np.arange(start_ind, end_ind + 1) / fs - PRE_EVENT_T / 2
             x_int = d2xdt2_onset[start_ind : end_ind + 1]
 
-            d2xdt2_peak = d2xdt2_onset[peak]
-            t_peak = t_int[peak - start_ind]
-
             int_d2xdt2 = np.sum(x_int) / fs
             try:
                 t_cmass = np.average(t_int, weights=x_int)
@@ -549,56 +461,44 @@ def calc_t_onsets(d2xdt2, dff_reg, dxdt, reg_mean_pos, fs):
             t_onset_dict["time_com"].append(t_cmass)
             t_onset_dict["time_start"].append(np.amin(t_int))
             t_onset_dict["time_end"].append(np.amax(t_int))
-            t_onset_dict["time_peak"].append(t_peak)
-            t_onset_dict["dxdt_end"].append(dxdt_onset[end_ind])
             t_onset_dict["diff_dxdt"].append(int_d2xdt2)
             t_onset_dict["pre_dff"].append(dff_onset[start_ind])
             t_onset_dict["pre_bl_sub_dff"].append(dff_onset[start_ind] - bl)
-            t_onset_dict["peak"].append(d2xdt2_peak)
             t_onset_dict["region"].append(reg_num)
 
             if int_d2xdt2 > diff_dxdt:
                 diff_dxdt = int_d2xdt2
                 t_com = t_cmass
 
-            if d2xdt2_peak > max_peak:
-                max_peak = d2xdt2_peak
-                max_t_peak = t_peak
-
         t_onsets[reg_num] = t_com
         stats.append(t_com), names.append(f"t_onset_r{reg_num}")
         stats.append(diff_dxdt), names.append(f"diff_dxdt_r{reg_num}")
-        stats.append(max_t_peak), names.append(f"t_peak_d2xdt2_r{reg_num}")
-        stats.append(max_peak), names.append(f"peak_d2xdt2_r{reg_num}")
 
     good = np.logical_not(np.logical_or(np.isnan(t_onsets), np.isinf(t_onsets)))
 
-    t_onset_slope = linregress(reg_mean_pos[good], t_onsets[good]).slope
-    t_onset_pearsonr = np.absolute(pearsonr(reg_mean_pos[good], t_onsets[good])[0])
+    linreg = linregress(reg_mean_pos[good], t_onsets[good])
+    t_onset_slope = linreg.slope
+    t_onset_rsq = np.power(linreg.rvalue, 2)
 
     stats.append(t_onset_slope), names.append("t_onset_slope")
-    stats.append(t_onset_pearsonr), names.append("t_onset_pearsonr")
+    stats.append(t_onset_rsq), names.append("t_onset_rsq")
 
     return t_onset_dict, stats, names
 
 
-def calc_stats(dff_reg_filt, d2xdt2, reg_mean_pos, fs):
+def calc_stats(dff_reg_filt, fs):
     stats = []
     names = []
 
-    stat_list, name_list = calc_peak_bl_amp(dff_reg_filt, reg_mean_pos, fs)
+    stat_list, name_list = calc_peak_bl_amp(dff_reg_filt, fs)
     stats += stat_list
     names += name_list
 
-    stat_list, name_list = acceleration(d2xdt2, fs)
+    stat_list, name_list = calc_ts(dff_reg_filt, fs)
     stats += stat_list
     names += name_list
 
-    stat_list, name_list = calc_ts(dff_reg_filt, reg_mean_pos, fs)
-    stats += stat_list
-    names += name_list
-
-    stat_list, name_list = calc_t_lag(dff_reg_filt, reg_mean_pos, fs)
+    stat_list, name_list = calc_t_lag(dff_reg_filt, fs)
     stats += stat_list
     names += name_list
 
@@ -683,12 +583,15 @@ def process_roi(
     for evt_num in tqdm(range(num_evts), desc="Event", leave=False):
         dff_reg = dff_evts[evt_num]
 
-        dff_reg_filt = low_pass_filter(
-            dff_reg,
-            fs,
-            FREQ_CUT_OFF,
-            FILTER_ORDER,
-        )
+        if LOW_PASS_FILTER:
+            dff_reg_filt = low_pass_filter(
+                dff_reg,
+                fs,
+                FREQ_CUT_OFF,
+                FILTER_ORDER,
+            )
+        else:
+            dff_reg_filt = dff_reg
         d2xdt2 = np.zeros(dff_reg_filt.shape)
         d2xdt2[3:-3] = second_derivative(dff_reg_filt, 1 / fs)
         dxdt = np.zeros(dff_reg_filt.shape)
@@ -697,13 +600,13 @@ def process_roi(
         d2xdt2s.append(d2xdt2)
 
         t_onset_dict, stats_t_onset, names_t_onset = calc_t_onsets(
-            d2xdt2, dff_reg, dxdt, reg_mean_pos, fs
+            d2xdt2, dff_reg, reg_mean_pos, fs
         )
         t_onset_dict = dump_meta_stats(
             t_onset_dict, exp_name, crop_id, roi_num, isi, ptz, evt_num
         )
 
-        stats, names = calc_stats(dff_reg_filt, d2xdt2, reg_mean_pos, fs)
+        stats, names = calc_stats(dff_reg_filt, fs)
         stats += stats_t_onset
         names += names_t_onset
 
