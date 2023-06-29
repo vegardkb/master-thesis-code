@@ -179,7 +179,6 @@ def plot_roi_dff(f, rois, colors, volume_rate):
     )
     ax.add_artist(asb)
 
-    # ax.legend()
     ax.axis("off")
 
     plt.tight_layout()

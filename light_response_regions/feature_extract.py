@@ -39,7 +39,6 @@ T_ONSET_FNAME = "t_onsets_light_response"
 POS_REGS_FNAME = "pos_regs"
 
 DISTAL_REG = 0
-BUFFER_T = 5
 PRE_EVENT_T = 5
 POST_EVENT_T_PEAK = 40
 POST_STIM_T_LAG = 10

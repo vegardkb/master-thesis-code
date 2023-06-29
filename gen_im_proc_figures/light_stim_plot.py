@@ -6,15 +6,6 @@ from fio import (
     generate_figures_dir,
 )
 
-DARKGRAY = (130 / 255, 129 / 255, 129 / 255)
-LIGHTBLUE = (101 / 255, 221 / 255, 247 / 255)
-DARKBLUE = (99 / 255, 52 / 255, 217 / 255)
-ORANGE = (247 / 255, 151 / 255, 54 / 255)
-RED = (194 / 255, 35 / 255, 23 / 255)
-BROWN = (125 / 255, 69 / 255, 10 / 255)
-GREEN = (126 / 255, 186 / 255, 30 / 255)
-
-
 SMALL_SIZE = 8
 MEDIUM_SIZE = 8
 BIGGER_SIZE = 10
@@ -59,10 +50,8 @@ def light_stim_plot():
 
     t_on = np.array(t_on)
     t_off = t_on + 10 / 60
-    fig, ax = plt.subplots()
 
-    """ ax.vlines(t_on, 0, 1, color="orange")
-    ax.vlines(t_off, 0, 1, color="gray") """
+    _, ax = plt.subplots()
     for on, off in zip(t_on, t_off):
         ax.fill_betweenx([0, 1], on, off, alpha=0.7, color="red")
     ax.set_xlim(0, 60)
