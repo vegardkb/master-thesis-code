@@ -7,7 +7,7 @@ from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 from scipy import signal
 
 
-EXP_DIR = "Y:\\Vegard\\data\\20220412_12_32_27_GFAP_GCamp6s_F2_PTZ\\OpticTectum"
+EXP_DIR = "Y:\\Vegard\\data\\20220211_13_18_56_GFAP_GCamp6s_F2_C\\OpticTectum"
 
 ALIGNED_GLIA_FNAME = "aligned.tif"
 DENOISED_GLIA_FNAME = "denoised.tif"

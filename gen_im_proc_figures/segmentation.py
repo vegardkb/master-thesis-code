@@ -32,7 +32,7 @@ USE_CHAN2 = False
 ROI_CM = cm.rainbow
 REG_CM = cm.viridis_r
 
-N_REGIONS = 6
+N_REGIONS = 4
 MICROM_PER_M = 1000000
 
 N_FRAMES_BASELINE = 800

@@ -1,5 +1,4 @@
 import numpy as np
-from scipy import ndimage
 from tqdm import tqdm
 import threading
 from enum import Enum
@@ -39,7 +38,7 @@ EXP_NAMES = [
 ] """
 
 CROP_ID = "OpticTectum"
-ROIS_FNAME = "rois_smooth"
+ROIS_FNAME = "rois"
 PROTOCOL_NAME = "GFAP;Gcamp6s2021_11_12_data"
 ACTIVITY_FNAME = "dff_stat"
 
@@ -62,7 +61,7 @@ MICROM_PER_M = 1000000
 CROP_CELL = False
 CELL_LENGTH = 55
 
-N_REGIONS_LIST = [110]
+N_REGIONS_LIST = [4]
 MAX_DYN_RANGE = False
 
 

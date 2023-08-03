@@ -116,7 +116,7 @@ def plot_pcs(pc1):
 
 def main():
     fig_dir = "Y:\\Vegard\\data\\figures\\preprocess"
-    num_regions = 6
+    num_regions = 4
 
     roi = np.load(ROIS_PATH)[ROI_NUM]
     cfg = load_cfg(EXP_DIR)

@@ -79,7 +79,10 @@ def create_column_names(num_regions):
             "bl" + f"_r{reg_num}",
             "amp" + f"_r{reg_num}",
             "amp5s" + f"_r{reg_num}",
-            "amp15s" + f"_r{reg_num}",
+            "amprnd" + f"_r{reg_num}",
+            "filt_bl" + f"_r{reg_num}",
+            "filt_amp5s" + f"_r{reg_num}",
+            "filt_amprnd" + f"_r{reg_num}",
             "t_peak" + f"_r{reg_num}",
         ]
     return cols
@@ -103,6 +106,15 @@ def second_derivative(x, dt):
     )
 
 
+def high_pass_filter(x, fs, f_c, order):
+    sos = signal.butter(order, f_c, btype="high", output="sos", fs=fs)
+    dff_reg = signal.sosfiltfilt(
+        sos,
+        x,
+    )
+    return dff_reg
+
+
 def calc_peak_bl_amp(dff_reg, fs):
     dff_bl = dff_reg[: int(PRE_EVENT_T * fs)]
     dff_peak = dff_reg[
@@ -112,22 +124,33 @@ def calc_peak_bl_amp(dff_reg, fs):
     bl = np.mean(dff_bl, axis=0)
     peak = np.amax(dff_peak, axis=0)
     dff5s = dff_reg[int((PRE_EVENT_T + 5) * fs)]
-    dff15s = dff_reg[int((PRE_EVENT_T + 15) * fs)]
+    dffrnd = dff_reg[int((PRE_EVENT_T + 110) * fs)]
     neg = peak < bl
 
     if np.any(neg):
         peak[neg] = np.amin(dff_peak[:, neg], axis=0)
     amp = peak - bl
     amp5s = dff5s - bl
-    amp15s = dff15s - bl
+    amprnd = dffrnd - bl
+
+    fs_space = 1 / (CELL_LENGTH / dff_reg.shape[1])  # Regions per micrometer
+    fc_space = 1 / 10  # Cut off at 10 micrometer period
+    f_order = 2
+
+    filt_bl = high_pass_filter(bl, fs_space, fc_space, f_order)
+    filt_amp5s = high_pass_filter(amp5s, fs_space, fc_space, f_order)
+    filt_amprnd = high_pass_filter(amprnd, fs_space, fc_space, f_order)
 
     stats, names = [], []
     for reg_num in range(dff_reg.shape[1]):
-        stats.append(bl[reg_num]), names.append(f"bl_r{reg_num}")
         stats.append(peak[reg_num]), names.append(f"peak_r{reg_num}")
         stats.append(amp[reg_num]), names.append(f"amp_r{reg_num}")
+        stats.append(bl[reg_num]), names.append(f"bl_r{reg_num}")
         stats.append(amp5s[reg_num]), names.append(f"amp5s_r{reg_num}")
-        stats.append(amp15s[reg_num]), names.append(f"amp15s_r{reg_num}")
+        stats.append(amprnd[reg_num]), names.append(f"amprnd_r{reg_num}")
+        stats.append(filt_bl[reg_num]), names.append(f"filt_bl_r{reg_num}")
+        stats.append(filt_amp5s[reg_num]), names.append(f"filt_amp5s_r{reg_num}")
+        stats.append(filt_amprnd[reg_num]), names.append(f"filt_amprnd_r{reg_num}")
 
     return stats, names
 
