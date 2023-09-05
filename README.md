@@ -15,11 +15,14 @@ Code for preprocessing and performing analysis of spatiotemporal dynamics in ind
     a. Set appropriate constants in s2p_registration.py
     b. Create ops-file from suite2p
     c. run s2p_registration.py
-  4. (optional, assumes necessary installs have been made for DeepInterpolation) Noise removal with DeepInterpolation
-    a. (training) Select traning and validation dataset in deepinterpolation_scripts/training.py
-    b. (training) run training.py
-    c. Set appropriate constants in inference.py
-    d. run inference.py
+  4. (optional) Noise removal with DeepInterpolation
+    a. (installation) Prepare computer for GPU acceleration https://mark-gargan.medium.com/setting-up-tensorflow-2-4-on-windows-with-cuda-gpu-support-af09dd6a8441
+    b. (installation) Copy all files from yaksi5/Vegard/python/master-thesis-code/deepinterpolation into the folder master-thesis-code/deepinterpolation on your computer
+    c. (installation) Restart computer to complete installation
+    d. (training) Select traning and validation dataset in deepinterpolation_scripts/training.py
+    e. (training) run training.py
+    f. Set appropriate constants in inference.py
+    g. run inference.py
   6. Cell detection
     a. set exp_names and directories in s2p_celldetect.py
     b. run s2p_celldetect.py
