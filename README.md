@@ -20,12 +20,12 @@ Code for preprocessing and performing analysis of spatiotemporal dynamics in ind
     b. (training) run training.py
     c. Set appropriate constants in inference.py
     d. run inference.py
-  5. (optional) Create tiff from aligned and denoised data
-    a. run bin2tiff.py
   6. Cell detection
     a. set exp_names and directories in s2p_celldetect.py
     b. run s2p_celldetect.py
     c. filter ROIs with suite2p GUI
+  5. (optional) Create tiff from aligned and denoised data
+    a. run bin2tiff.py
   7. Merge partial ROIs
     a. Set appropratie constants in roimerge.py and run
 
