@@ -2,6 +2,10 @@
 
 Code for preprocessing and performing analysis of spatiotemporal dynamics in individual radial astrocytes during stimulus responses.
 
+NOTE: The scripts expect an old version of suite2p (0.11.x) and a modified version of deepinterpolation (see step 4.b below). Using newer versions of suite2p or deepinterpolation out of the box will introduce bugs, though those should be fixable.
+
+TODO: Add .yaml for tested conda environments.
+
 ## Preprocessing steps:
   0. Imaging data is assumed to be in a .raw file and have a corresponding .ini configuration file. Assumed key names is documented in cropbin/cropbin_util.py/CFG_FORMAT. Imaging data is assumed recording from an experiment with recurring visual stimulus.
   1. Crop and downsample
