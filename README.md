@@ -2,9 +2,7 @@
 
 Code for preprocessing and performing analysis of spatiotemporal dynamics in individual radial astrocytes during stimulus responses.
 
-NOTE: The scripts expect an old version of suite2p (0.11.x) and a modified version of deepinterpolation (see step 4.b below). Using newer versions of suite2p or deepinterpolation out of the box will introduce bugs, though those should be fixable.
-
-TODO: Add .yaml for tested conda environments.
+NOTE regarding package versions: The scripts expect an old version of suite2p (0.11.x) and a modified version of deepinterpolation (see step 4.b below). Using newer versions of suite2p or deepinterpolation out of the box will introduce bugs, though those should be fixable. It is suggested to run the scripts using the suite2p environment stored under conda_envs for all of the preprocessing steps except for the deepinterpolation step for which the deepinterpolation environment should be used. For data analysis steps the data_analysis environment should be used, but the suite2p environment might work (not tested).
 
 ## Preprocessing steps:
   0. Imaging data is assumed to be in a .raw file and have a corresponding .ini configuration file. Assumed key names is documented in cropbin/cropbin_util.py/CFG_FORMAT. Imaging data is assumed recording from an experiment with recurring visual stimulus.
@@ -20,7 +18,7 @@ TODO: Add .yaml for tested conda environments.
     b. Create ops-file from suite2p
     c. run s2p_registration.py
   4. (optional) Noise removal with DeepInterpolation
-    a. (installation) Prepare computer for GPU acceleration https://mark-gargan.medium.com/setting-up-tensorflow-2-4-on-windows-with-cuda-gpu-support-af09dd6a8441
+    a. (installation) Prepare computer for GPU acceleration https://mark-gargan.medium.com/setting-up-tensorflow-2-4-on-windows-with-cuda-gpu-support-af09dd6a8441. Note: linked guide is for tf 2.4, conda_envs/deepinterpolation.yml uses tf 2.7 with associated cuDNN, CUDA and python versions.
     b. (installation) Copy all files from yaksi5/Vegard/python/master-thesis-code/deepinterpolation into the folder master-thesis-code/deepinterpolation on your computer
     c. (installation) Restart computer to complete installation
     d. (training) Select traning and validation dataset in deepinterpolation_scripts/training.py
